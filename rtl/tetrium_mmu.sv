@@ -18,12 +18,14 @@
 //    (uncached, locked, after the store buffer has drained), the entry is written and
 //    the checks are redone on the walked bits.  Accessed / dirty bits are written
 //    only when they change; the written word's line is invalidated in both caches.
-//  * L2 TLB (L2TLB_AB > 0): 2^L2TLB_AB entries, direct-mapped by linear[12 +: L2TLB_AB], in
-//    block RAM: {valid, tag, ppn, U, W, D, PCD, PWT} as the TLB's.  Read with the walker's
-//    TLB lookup; a hit with the rights (and D for a write) fills the TLB as a walk would
-//    (no bus access).  Filled by every successful walk.  INVLPG and TR6 writes clear the
-//    entry at that index; a CR3 write clears all of it (one entry per cycle, the L2 unused
-//    meanwhile).  TR6 / TR7 see only the TLB.
+//  * L2 TLB (L2TLB_AB > 0): 2^L2TLB_AB entries in L2TLB_WAYS ways (1, 2 or 4) of
+//    2^L2TLB_AB / L2TLB_WAYS sets (set = the low bits of linear[31:12]), one block RAM per
+//    way, all read at once: {valid, tag, ppn, U, W, D, PCD, PWT} as the TLB's.  Read with
+//    the walker's TLB lookup; a hit with the rights (and D for a write) fills the TLB as a
+//    walk would (no bus access).  Filled by every successful walk, round-robin over the ways
+//    (into the way that hit when only the rights or D were missing).  INVLPG and TR6 writes
+//    clear every way of that set; a CR3 write clears all of it (one set per cycle, the L2
+//    unused meanwhile).  TR6 / TR7 see only the TLB.
 //  * TR6 / TR7: write (C = 0) and lookup (C = 1) as in the i486 manual (10.6): a write
 //    places the entry in the way TR7.REP (TR7.PL set) or the replacement way; a lookup
 //    matches the tag, V and the attribute bit pairs and reports PA, PCD, PWT, the LRU
@@ -251,31 +253,54 @@ module tetrium_mmu (
   // ---------------------------------------------------------------- L2 TLB
   localparam int L2B = `L2TLB_AB;
   localparam int L2N = (L2B > 0) ? L2B : 1;
-  localparam int L2T = 20 - L2N;                       // tag bits
+  localparam int L2W = `L2TLB_WAYS;                    // ways (1, 2, 4), one RAM each, read in parallel
+  localparam int L2WB = $clog2(L2W);
+  localparam int L2WN = (L2WB > 0) ? L2WB : 1;
+  localparam int L2S = L2N - L2WB;                     // set index bits
+  localparam int L2T = 20 - L2S;                       // tag bits
   logic           l2_hit;                              // (W_LK2) the L2 holds rq_a
   logic [24:0]    l2_d;                                // {ppn, U, W, D, PCD, PWT}
   logic           l2_clr;                              // clearing (reset, CR3 write): unused
   logic           l2_nof;                              // no fill for the walk in progress
-  logic [L2N-1:0] l2_cnt;
+  logic [L2S-1:0] l2_cnt;
   generate if (L2B > 0) begin : g_l2
-    logic [L2T+25:0] rd, wd;
-    logic            we;
-    logic [L2N-1:0]  wa;
+    genvar gl;
+    logic [L2W-1:0][L2T+25:0] l2rd;
+    logic [L2T+25:0] wd;
+    logic [L2W-1:0]  we, hw;
+    logic [L2S-1:0]  wa;
+    logic [L2WN-1:0] he, hwq, rr;                      // way that hits, registered (W_LK2), round-robin victim
+    logic            hq;
     always_comb begin
-      we = 1'b0; wa = rq_a[12 +: L2N]; wd = {1'b1, rq_a[31 -: L2T], wk_e[24:0]};
-      if (l2_clr) begin we = 1'b1; wa = l2_cnt; wd = '0; end
-      else if (invlpg_v || tr6_wr) begin we = 1'b1; wa = invlpg_v ? invlpg_a[12 +: L2N] : tr_d[12 +: L2N]; wd = '0; end
-      else if (ws == W_FIN && !l2_nof) we = 1'b1;
+      he = '0;
+      for (int i = 0; i < L2W; i++) begin
+        hw[i] = l2rd[i][L2T + 25] && (l2rd[i][L2T + 24:25] == rq_a[31 -: L2T]);
+        if (hw[i]) he = i[L2WN-1:0];
+      end
     end
-    tetrium_bram #(.AW(L2N), .DW(L2T + 26)) u_l2 (
-        .clk(clk), .re(1'b1), .raddr(rq_a[12 +: L2N]), .rdata(rd), .we(we), .waddr(wa), .wdata(wd));
-    assign l2_hit = rd[L2T + 25] && (rd[L2T + 24:25] == rq_a[31 -: L2T]) && !l2_clr;
-    assign l2_d   = rd[24:0];
+    // a fill writes the way that hit (a rights / D miss) or the round-robin way; a clear, all ways
+    always_comb begin
+      we = '0; wa = rq_a[12 +: L2S]; wd = {1'b1, rq_a[31 -: L2T], wk_e[24:0]};
+      if (l2_clr) begin we = '1; wa = l2_cnt; wd = '0; end
+      else if (invlpg_v || tr6_wr) begin we = '1; wa = invlpg_v ? invlpg_a[12 +: L2S] : tr_d[12 +: L2S]; wd = '0; end
+      else if (ws == W_FIN && !l2_nof) begin
+        for (int i = 0; i < L2W; i++) we[i] = (L2W == 1) || ((hq ? hwq : rr) == i[L2WN-1:0]);
+      end
+    end
+    for (gl = 0; gl < L2W; gl++) begin : g_w
+      tetrium_bram #(.AW(L2S), .DW(L2T + 26)) u_l2 (
+          .clk(clk), .re(1'b1), .raddr(rq_a[12 +: L2S]), .rdata(l2rd[gl]), .we(we[gl]), .waddr(wa), .wdata(wd));
+    end
+    assign l2_d   = l2rd[he][24:0];
+    assign l2_hit = |hw && !l2_clr;
     always_ff @(posedge clk) begin
       if (rst || flush_all) begin l2_clr <= 1'b1; l2_cnt <= '0; end
       else if (l2_clr) begin l2_cnt <= l2_cnt + 1'b1; if (&l2_cnt) l2_clr <= 1'b0; end
       if (ws == W_IDLE) l2_nof <= 1'b0;
       else if (flush_all || invlpg_v || tr6_wr) l2_nof <= 1'b1;
+      if (ws == W_LK2) begin hq <= l2_hit; hwq <= he; end
+      if (rst) rr <= '0;
+      else if (ws == W_FIN && !l2_nof && !hq) rr <= rr + 1'b1;
     end
   end else begin : g_nol2
     assign l2_hit = 1'b0; assign l2_d = '0; assign l2_clr = 1'b0; assign l2_nof = 1'b0; assign l2_cnt = '0;

@@ -38,8 +38,9 @@
 `ifndef UT_WAYS
 `define UT_WAYS 1
 `endif
-// L2 TLB behind the TLB, looked up by the walker: 2^L2TLB_AB entries direct-mapped in
-// block RAM (0: none)
+// L2 TLB behind the TLB, looked up by the walker: 2^L2TLB_AB entries (0: none) in
+// L2TLB_WAYS ways (1, 2 or 4), one block RAM each (Cyclone V: 1024 x 4 ways = 4 M10K, as
+// direct-mapped)
 // fetch micro-TLB (replaces the fetch last-page register): 2^FUT_SB entries direct-mapped
 // by linear[12 +: FUT_SB], LUT RAM; a fetch from a page it holds needs no TLB lookup
 `ifndef FUT_SB
@@ -47,6 +48,9 @@
 `endif
 `ifndef L2TLB_AB
 `define L2TLB_AB 10
+`endif
+`ifndef L2TLB_WAYS
+`define L2TLB_WAYS 4
 `endif
 `ifndef BUS_DW
 `define BUS_DW 32          // default Wishbone data width (16, 32, 64, 128)

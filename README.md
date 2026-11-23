@@ -28,8 +28,8 @@ micro-op, and one completes per cycle. The main design decisions:
   one.
 - **TLB off the hit path.** The caches are virtually indexed and physically tagged (4 KB
   ways). 16-entry micro-TLBs for fetch and data (the data one looked up in A2 from base
-  and offset, without waiting for their sum) sit in front of an i486-organized TLB, an L2
-  TLB and a hardware page walker.
+  and offset, without waiting for their sum) sit in front of an i486-organized TLB, a
+  1024-entry 4-way L2 TLB and a hardware page walker.
 - **Microcode in block RAM**, generated from Python. Each micro-op word carries the address
   fields of its successor, keeping the ROM's latency out of the address path. Far
   transfers, gates, interrupts and task switches are micro-op sequences.
@@ -99,7 +99,7 @@ the first column point to the notes below.
 
 | FPGA | Tool | fmax | Logic | RAM | DSP |
 |---|---|---|---|---|---|
-| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 96.1–96.2 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 31 BRAM36 | 4 |
+| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 96.1–96.2 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 34 BRAM36 | 4 |
 | Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 83.5–85.9 MHz | 20.6k ALMs, 13.7k registers | 139 M10K, 90 kbit MLAB | 3 |
 
 The CPU alone (I/O as virtual pins), maximum-performance settings, three runs each
