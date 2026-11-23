@@ -127,7 +127,7 @@ module tetrium_core #(
   logic [$clog2(`DC_KB * 1024 / `DC_WAYS) - $clog2(`LINE_B) - 2:0] m_tset0, m_tset1;   // D-cache tag sets per line-parity bank
   logic m_as32;
   logic [31:0] e_t0, e_idtb, e_gdtb, e_ldtb, e_trb;
-  logic        e_byp_t0, m_ldt0, rd_ecv;
+  logic        e_byp_t0, e_byp_ok, m_ldt0, rd_ecv;
   logic [15:0] rd_errc;
   logic [31:0] c_disp, c_imm;
   logic [31:0] c_ip_start, c_ip_op, c_ptgt;
@@ -450,7 +450,7 @@ module tetrium_core #(
       .ewh0, .ewh1, .ewv0, .ewv1,
       .esw_en, .esw_r, .esw_k, .esw_base, .esw_lim, .esw_acc, .esw_db, .esw_nul, .edf_en, .edf_v, .ss_snap, .ss_rest,
       .m_dmask_in(m_valid ? m_dmask : 16'd0), .e_dmask_in(e_dmask),
-      .e_dm_e, .e_byp_m, .e_byp_32, .e_byp_d, .m_ldm, .m_ld32, .m_ldt0, .a2_valid,
+      .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .m_ldm, .m_ld32, .m_ldt0, .a2_valid,
       .ac_row, .ac_row1,
       .m_valid, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
       .m_ip_next, .m_sreg, .m_rep, .m_os32, .m_as32, .m_lock, .m_pt, .m_ptgt, .m_bid, .m_inj, .m_abr, .m_lin, .m_lin4, .m_tset0, .m_tset1, .m_off,
@@ -480,7 +480,7 @@ module tetrium_core #(
   tetrium_exec #(.HAS_CPUID(HAS_CPUID), .CPU_SIG(CPU_SIG), .DEBUG_REGS(DEBUG_REGS)) u_exec (
       .clk, .rst,
       .init_gpr, .init_seg, .init_csbase, .init_cr0, .init_ip, .init_flags,
-      .m_adv, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
+      .m_adv, .m_valid, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
       .m_ip_next, .m_sreg, .m_rep, .m_as32, .m_os32, .m_pt, .m_ptgt, .m_bid, .m_inj, .m_abr, .m_off,
       .m_spw, .m_spv, .m_siw, .m_siv, .m_diw, .m_div, .m_cxw, .m_cxv,
       .m_tgt, .m_tbad, .m_brlin, .m_cxnz, .m_ataken, .m_aex, .m_dmask, .m_ldm, .m_ld32, .m_ldt0, .m_amis, .m_xc, .m_xs, .m_data, .m_ldwait, .m_fwd,
@@ -491,7 +491,7 @@ module tetrium_core #(
       .ff_go, .ff_err, .ff_lin, .m_lock, .lk_hold, .e_gdtl, .e_idtl, .e_ldtl, .m_noacc,
       .x_act, .x_lin, .x_lin4, .x_sz, .x_data, .x_hit, .x_hb, .x_cached, .x_fill, .x_fill_done,
       .du_req, .du_done, .du_data(rdata32), .l_st_v,
-      .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .smc_busy, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,
+      .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .smc_busy, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,
       .e_gpr, .e_seg, .e_df, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_tss32, .e_ldtw, .a_ssbase, .a_sacc, .e_flags, .e_ip, .e_pm, .e_vm, .e_cpl, .e_csd, .e_iochk, .e_pgq, .e_cr0, .e_sysdbg(dbg_sys),
       .ewh0, .ewh1, .ewv0, .ewv1,
       .esw_en, .esw_r, .esw_k, .esw_base, .esw_lim, .esw_acc, .esw_db, .esw_nul, .edf_en, .edf_v, .ss_snap, .ss_rest,

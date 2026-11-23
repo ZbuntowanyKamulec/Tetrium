@@ -510,6 +510,7 @@ ref_step_rep_partial(uint32_t remaining)
     else
         CX = (uint16_t) remaining;
     cpu_state.pc = pc0;
+    cpu_rep_cont_lin = cs + pc0;
     return 1;
 }
 
@@ -523,6 +524,7 @@ ref_interrupt(int vector)
     flags_rebuild();
     oldcs           = CS;
     cpu_state.oldpc = cpu_state.pc;
+    cpu_rep_rf();
     if (msw & 1)
         pmodeint(vector, 0);
     else if ((vector << 2UL) + 3UL > idt.limit) {
@@ -559,6 +561,18 @@ ref_nmi(void)
     flags_rebuild();
     oldcs           = CS;
     cpu_state.oldpc = cpu_state.pc;
+    cpu_rep_rf();
     x86_int(2);
     cpu_debug_trap_after_delivery();
+}
+
+/* linear -> physical without side effects (instruction bytes for the testbench) */
+extern uint64_t mmutranslate_noabrt(uint32_t addr, int rw);
+uint32_t
+ref_phys(uint32_t lin)
+{
+    if (!(cr0 >> 31))
+        return lin;
+    uint64_t a = mmutranslate_noabrt(lin, 0);
+    return (a > 0xffffffffULL) ? lin : (uint32_t) a;
 }

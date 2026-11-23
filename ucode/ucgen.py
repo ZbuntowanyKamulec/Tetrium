@@ -180,7 +180,7 @@ CK = ['NONE', 'SEG', 'CSJ', 'CSC', 'CSR', 'LDT', 'TSS', 'CSI', 'INTG', 'INTCS', 
 CHK = ['NONE', 'CPL0', 'IOPL', 'V86IOPL']
 #  CPL0 : #GP(0) unless CPL 0 (protected mode) / always in V86
 #  IOPL : #GP(0) if CPL > IOPL (protected mode; V86: IOPL < 3)       CLI, STI
-#  V86IOPL : #GP(0) in V86 with IOPL < 3                    PUSHF, POPF, INT, IRET
+#  V86IOPL : #GP(0) in V86 with IOPL < 3                    PUSHF, POPF, INT n, IRET
 
 # --------------------------------------------------------------- layout
 FIELDS = [  # name, width   (LSB first)
@@ -445,9 +445,9 @@ define(0xCA, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z'),
                       U(a='POPN', mrd=1, abr='BRI', e='JFAR', sa='MEM', sb='T0', sz='Z')])
 define(0xCB, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z'),
                       U(a='POP', mrd=1, abr='BRI', e='JFAR', sa='MEM', sb='T0', sz='Z')])
-define(0xCC, lambda: [U(e='INT', sz='W16', chk='V86IOPL')])
+define(0xCC, lambda: [U(e='INT', sz='W16')])                      # INT3, INTO: not IOPL-sensitive in V86
 define(0xCD, lambda: [U(e='INT', sz='W16', chk='V86IOPL')])
-define(0xCE, lambda: [U(e='INTO', sz='W16', chk='V86IOPL')])
+define(0xCE, lambda: [U(e='INTO', sz='W16')])
 define(0xCF, lambda: [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z', chk='V86IOPL'),
                       U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T1', sz='Z'),
                       U(a='POP', mrd=1, e='IRET', sb='MEM', sz='Z')])
@@ -667,7 +667,8 @@ define(0xCF, lambda: far_cs([U(e='IRNT', sz='Z'),
        [U(e='LDCS', ck='CSI', sb='T4', sz='Z')], mode='pm')
 
 # LAR / LSL (0F 02 / 03), VERR / VERW (0F 00 /4 /5): the selector to T0, the descriptor
-# (LSL: low dword to T1) is read without faulting, ZF tells
+# (LSL: low dword to T1) is read without faulting, ZF tells; the NOP keeps the next instruction's
+# bypass off the result of an invalid one (not written)
 def lar(ck, rd):
     def mk(m):
         first = [U(a='EA', mrd=1, m16=1, e='PASSB', sb='MEM', d1='T0', sz='W16')] if m else []
@@ -675,7 +676,7 @@ def lar(ck, rd):
         sel = 'T0' if m else 'RM'
         lo = [U(a=a, aoff=0, mrd=1, e='DLO', ck='ACC', sa=sel, sb='MEM', d1='T1', sz='D32')] if ck == 'LSL' else []
         return first + lo + [U(a=a, aoff=4, mrd=1, e='LARV', ck=ck, sa=sel, sb='MEM', d1=('REG' if rd else 'NONE'),
-                               sz=('Z' if rd else 'W16'))]
+                               sz=('Z' if rd else 'W16'))] + ([U(e='NOP')] if rd else [])
     return (lambda: mk(True)), (lambda: mk(False))
 for op, ck in ((0x02, 'LAR'), (0x03, 'LSL')):
     m_, r_ = lar(ck, True)

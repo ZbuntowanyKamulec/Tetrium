@@ -30,10 +30,10 @@
 `ifndef DEBUG_REGS
 `define DEBUG_REGS 1
 `endif
-// data micro-TLB in front of the TLB (A2 lookup): 2^UT_SB sets (linear[12 +: UT_SB]) x
-// UT_WAYS ways (1, 2 or 4); UT_SB 0: fully associative
+// data micro-TLB in front of the TLB (A2 lookup): 2^UT_SB sets (linear[12 +: UT_SB], UT_SB <= 4) x
+// UT_WAYS ways (1, 2 or 4; at most 16 entries); UT_SB 0: fully associative
 `ifndef UT_SB
-`define UT_SB 3
+`define UT_SB 4
 `endif
 `ifndef UT_WAYS
 `define UT_WAYS 1

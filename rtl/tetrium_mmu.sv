@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 ZbuntowanyKamulec
-// Tetrium paging unit: TLB (i486 organisation), last-page registers, page walker,
+// Tetrium paging unit: TLB (i486 organisation), data micro-TLB, page walker,
 // TLB test registers TR6 / TR7
 //  * TLB: 8 sets x 4 ways (32 entries), set = linear[14:12], tag = linear[31:15],
 //    pseudo-LRU replacement (3 bits per set, an invalid way first), as on the i486.
@@ -8,11 +8,11 @@
 //    port), valid bits and LRU bits in flip-flops (CR3 write: flash clear).
 //    U / W are the combined (most restrictive) PDE and PTE bits.
 //  * read ports: D (M-stage replay), F (fetch page change), K (walker, TR6)
-//  * data micro-TLB (checked in A2 for the primary and secondary address): 8 sets x
-//    2 ways, set = linear[14:12] as the TLB's, each entry a copy of one TLB entry with
-//    its way; a TLB write to that entry, INVLPG, a CR3 write, a TR6 write or a CR0 write
-//    drops it.  (The fetch last-page register lives in tetrium_fetch.)  Hits through it
-//    touch the entry's LRU bits like a TLB lookup.
+//  * data micro-TLB (checked in A2 for the primary and secondary address): 2^UT_SB sets x
+//    UT_WAYS ways (default 16 x 1), set = linear[12 +: UT_SB], each entry a copy of one TLB
+//    entry with its way; a TLB write to that entry, INVLPG, a CR3 write, a TR6 write, a CR0
+//    write or a change of A20M# drops it.  Hits through it touch the entry's LRU bits like a
+//    TLB lookup.  (The fetch micro-TLB lives in tetrium_fetch.)
 //  * walker: one request at a time (E before F): TLB lookup; if it misses, lacks the
 //    rights or a write needs D, the page tables are read and updated over the bus
 //    (uncached, locked, after the store buffer has drained), the entry is written and
@@ -293,12 +293,16 @@ module tetrium_mmu (
       tlb_wv = tr_d[11];
     end else if (ws == W_FIN) tlb_we = 1'b1;
   end
+  // (the micro-TLBs hold masked pages: dropped when A20M# changes too)
+  logic a20_q, a20_c;
+  always_ff @(posedge clk) begin a20_q <= a20m; a20_c <= (a20m != a20_q); end
+  wire lpk = lp_kill || a20_c;
   assign tw_v     = tlb_we;
   assign tw_sw    = {tlb_ws, tlb_ww};
-  assign lpf_kill = flush_all || invlpg_v || tr6_wr || lp_kill;
+  assign lpf_kill = flush_all || invlpg_v || tr6_wr || lpk;
 
   // ---------------------------------------------------------------- data micro-TLB
-  // 2^UT_SB sets (linear[12 +: UT_SB]; 3: the TLB's set) x UT_WAYS ways, each entry a copy
+  // 2^UT_SB sets (linear[12 +: UT_SB]; 3: the TLB's set; 4: one bit more) x UT_WAYS ways, each entry a copy
   // of one TLB entry with its way.  Loaded by M replay hits and E walks (into the way
   // already holding the page, else an invalid way, else the set's replacement way); a TLB
   // write to that entry, INVLPG, a CR3 write, a TR6 write or a CR0 write drops it.
@@ -307,7 +311,7 @@ module tetrium_mmu (
   // (the entries are kept in the flat output vectors: unpacked arrays here crashed Quartus 17
   //  synthesis, SGN 'Cannot get member name')
   logic [2:0]  ulru [UNS];
-  function automatic int uset(input logic [31:12] a); return (USB == 0) ? 0 : (int'(a[14:12]) & (UNS - 1)); endfunction
+  function automatic int uset(input logic [31:12] a); return (USB == 0) ? 0 : (int'(a[15:12]) & (UNS - 1)); endfunction
   function automatic logic [1:0] uvict(input logic [2:0] b);
     return (UWY == 1) ? 2'd0 : (UWY == 2) ? {1'b0, b[0]} : (b[0] ? {1'b1, b[2]} : {1'b0, b[1]});
   endfunction
@@ -321,7 +325,7 @@ module tetrium_mmu (
   logic [41:0] ld_e;
   logic [1:0]  ld_way;
   always_ff @(posedge clk) begin
-    ld_q <= (lpp_ld || lps_ld) && !(rst || flush_all || invlpg_v || tr6_wr || lp_kill) &&
+    ld_q <= (lpp_ld || lps_ld) && !(rst || flush_all || invlpg_v || tr6_wr || lpk) &&
             !(tlb_we && tlb_ws == lp_vpn[14:12] && tlb_ww == lp_way);
     ld_vpn <= lp_vpn; ld_e <= lp_e; ld_way <= lp_way;
   end
@@ -341,7 +345,7 @@ module tetrium_mmu (
     for (int q = 0; q < UN; q++) ld_sel[q] = ((q / UWY) == ld_s) && ((q % UWY) == int'(ld_w));
   end
   always_ff @(posedge clk) begin
-    if (rst || flush_all || invlpg_v || tr6_wr || lp_kill) begin
+    if (rst || flush_all || invlpg_v || tr6_wr || lpk) begin
       for (int i = 0; i < UN; i++) ut_v[i] <= 1'b0;
     end else begin
       for (int i = 0; i < UN; i++)

@@ -214,6 +214,8 @@ struct Sim {
                             uint16_t port = (uint16_t)((r.adr << AB) + b);
                             dma.io(port, r.dat[b]);
                             dut_o.push_back({port, r.dat[b]});
+                            static const bool le9 = getenv("LOCKE9") != nullptr;       // port E9h console
+                            if (le9 && port == 0xE9) { putchar(r.dat[b]); fflush(stdout); }
                             // port 92h (PS/2 system control A): bit 1 = A20 enabled
                             if (port == 0x92) top->a20m = !(r.dat[b] & 2);
                         }
@@ -747,9 +749,11 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
             ref_get(&pre);
             uint32_t lin0 = (pre.seg[REF_CS].base + pre.eip) & 0xFFFFF;
             uint8_t ib[16], dib[16];
-            for (int k = 0; k < 16; k++) ib[k] = rram[(lin0 + k) & 0xFFFFF];
+            (void)lin0;
+            for (int k = 0; k < 16; k++) ib[k] = rram[ref_phys(pre.seg[REF_CS].base + pre.eip + k) & 0xFFFFFF];
             uint32_t dlin = (pre.seg[REF_CS].base + (ss_pending ? prev_dip : pre.eip)) & 0xFFFFF;
-            for (int k = 0; k < 16; k++) dib[k] = rram[(dlin + k) & 0xFFFFF];
+            (void)dlin;
+            for (int k = 0; k < 16; k++) dib[k] = rram[ref_phys(pre.seg[REF_CS].base + (ss_pending ? prev_dip : pre.eip) + k) & 0xFFFFFF];
             prev_dip = dip;
             uint32_t um = 0;
             int r = 0;
@@ -778,9 +782,10 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 // them: the DUT's instruction is at its previous next IP)
                 ss_pending = true; skip = true;
             } else {
-                if (trap_pending && inj) trap_pending = false;
+                const bool was_trap = trap_pending && inj;     // (a trap after an instruction the model steps now)
+                if (was_trap) trap_pending = false;
                 ss_pending = false;
-                um = inj && !(pre.eflags & 0x100) ? 0 : undef_flags(ib);
+                um = inj && !was_trap && !(pre.eflags & 0x100) ? 0 : undef_flags(ib);
                 if (!inj) um = undef_flags(ib);
                 r = ref_step();
                 if (inj && S.top->dbg_ret_dbt) { model_ahead = true; skip = true; }
@@ -860,6 +865,11 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                         S.dq.pop_front();
                         if (bl > 400) break;
                         continue;
+                    }
+                    // the FLAGS image of a trap (TF) taken after the instruction: its undefined flags
+                    if (um && inj && it->val != d.second) {
+                        uint32_t k = (d.first - (post.gpr[4] + 8)) & 0xFFFFF;
+                        if (k < 2 && !((it->val ^ d.second) & ~(um >> (8 * k)) & 0xFF)) { it->val = d.second; rram[it->addr] = d.second; }
                     }
                     if (it->val != d.second && bl < 400)
                         bl += snprintf(buf + bl, sizeof(buf) - bl, " st[%05x]=%02x/%02x", d.first, d.second, it->val);

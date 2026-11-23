@@ -62,7 +62,7 @@ module tetrium_agu (
     input  logic        e_df,
     input  logic        e_pm,          // protected mode (CR0.PE, not V86): access rights checked
     input  logic [31:0] e_t0,          // microcode temporary T0 (address of an AM_TA uop)
-    input  logic        e_byp_t0,      // plain load into T0 in E with final data (e_byp_d)
+    input  logic        e_byp_t0,      // plain load into T0 in E (e_byp_d, final with e_byp_ok)
     input  logic [31:0] e_idtb,        // IDTR base (interrupt vector reads)
     input  logic [31:0] e_gdtb,        // GDTR / LDTR / TR bases (system table accesses)
     input  logic [31:0] e_ldtb,
@@ -90,7 +90,8 @@ module tetrium_agu (
     input  logic [15:0] m_dmask_in,
     input  logic [15:0] e_dmask_in,     // E uop + pending (written next cycle) destinations
     input  logic [7:0]  e_dm_e,         // GPR destinations of the uop in E alone
-    input  logic [7:0]  e_byp_m,        // plain load in E with final data: its GPR
+    input  logic [7:0]  e_byp_m,        // plain load in E: its GPR
+    input  logic        e_byp_ok,       // ... with final data
     input  logic        e_byp_32,
     input  logic [31:0] e_byp_d,
     // combinational address for the D-cache BRAM
@@ -487,9 +488,9 @@ module tetrium_agu (
   // matter.  A plain load in E serves as a source (bypass), but an A1 write of
   // its register must wait (the load's write lands after it).
   // (T0: a plain load into T0 in E is bypassed, see t0v)
-  wire  [15:0] pend_f = pm_b | m_dmask_in | {e_dmask_in[15] && !e_byp_t0, e_dmask_in[14:0]};
+  wire  [15:0] pend_f = pm_b | m_dmask_in | {e_dmask_in[15] && !(e_byp_t0 && e_byp_ok), e_dmask_in[14:0]};
   wire  [7:0]  pend_g = pm_b[7:0] | m_dmask_in[7:0] | e_dm_e;
-  wire  [7:0]  pend_s = pm_b[7:0] | m_dmask_in[7:0] | (e_dm_e & ~e_byp_m);
+  wire  [7:0]  pend_s = pm_b[7:0] | m_dmask_in[7:0] | (e_dm_e & ~(e_byp_m & {8{e_byp_ok}}));
   wire cx_rd    = cxw || (abr == ABR_JCXZ) || (repchk && rep);
   wire cx_pend  = pend_f[1] || (aexp_v && aexp_r == 3'd1);
   wire sb_stall = |(srcg & pend_s) || |(dsta & pend_g) || |(srco & pend_f) || (cx_rd && cx_pend);
@@ -693,7 +694,7 @@ module tetrium_agu (
     a1p.cxw      = cxw && !killrep;  a1p.cxv = cxv;
     a1p.tgt      = tgt;
     a1p.brlin    = brlin;
-    a1p.cxnz     = !cnt_1;
+    a1p.cxnz     = !(cxw ? cnt_1 : cnt_z);      // (a CMPS iteration's second uop: already counted)
     a1p.ataken   = a_res && a_taken && !killrep;
     a1p.aex      = aex_ok;
     a1p.dmask    = (killrep || uskip) ? 16'd0 : dmask;
@@ -832,53 +833,72 @@ module tetrium_agu (
     // (entries selected by compares with constants: an index times the entry width became
     //  DSP multipliers in Quartus)
     logic [41:0] e; logic h, hi, ok; logic [3:0] ix; logic [1:0] tw; int s;
-    s = (USB == 0) ? 0 : (int'(a[14:12]) & (UNS - 1));
+    s = (USB == 0) ? 0 : (int'(a[15:12]) & (UNS - 1));
     e = '0; h = 1'b0; ok = 1'b0; ix = '0; tw = '0;
     for (int q = 0; q < UNS * UWY; q++)
       if ((q / UWY) == s && (q % UWY) == 0) begin e = ut_e[q * 42 +: 42]; ix = 4'(q); tw = ut_w[q * 2 +: 2]; end
     for (int q = 0; q < UNS * UWY; q++)
       if ((q / UWY) == s) begin
-        hi = ut_v[q] && (ut_e[q * 42 + 25 +: 17] == a[31:15]) && (USB == 3 || ut_lo[q * 3 +: 3] == a[14:12]);
+        hi = ut_v[q] && (ut_e[q * 42 + 25 +: 17] == a[31:15]) && (USB >= 3 || ut_lo[q * 3 +: 3] == a[14:12]);
         ok = ok || (hi && lp_ok(ut_e[q * 42 +: 42], user, rd, wr, wpb));
         h = h || hi;
         if (hi) begin e = ut_e[q * 42 +: 42]; ix = 4'(q); tw = ut_w[q * 2 +: 2]; end
       end
     return {ok, h, ix, tw, e};
   endfunction
-  // One way, 8 sets (the default): sum-addressed.  The set linear[14:12] is base[14:12] +
-  // off[14:12] + c12 (c12: carry out of the low 12 bits); both candidate sets are read in
+  // 4, 8 or 16 sets, one or two ways: sum-addressed.  The set linear[12 +: USB] is base + off +
+  // c12 there (c12: carry out of the low 12 bits); both candidate sets are read in
   // parallel with the add and their tags compared with base + off without the carry chain
   // (a + b + cin == t: at each bit a ^ b ^ t is the carry in, which a, b, t of the bit
   // below determine); c12 picks one at the end.  (Paging only: no A20 mask then.)
-  function automatic logic sumeq(input logic [16:0] x, input logic [16:0] y, input logic [16:0] t,
+  localparam int UTB = 20 - USB;        // tag bits above the set
+  function automatic logic sumeq(input logic [UTB-1:0] x, input logic [UTB-1:0] y, input logic [UTB-1:0] t,
                                  input logic cin);
-    logic [16:0] k;
+    logic [UTB-1:0] k;
     k = (x & y) | ((x ^ y) & ~t);
-    return ~|((x ^ y ^ t) ^ {k[15:0], cin});
+    return ~|((x ^ y ^ t) ^ {k[UTB-2:0], cin});
   endfunction
-  function automatic logic [49:0] ufast(input logic [31:0] bs, input logic [31:0] of);
-    logic [3:0] s0, s1; logic [12:0] lo; logic [41:0] e0, e1; logic [1:0] w0, w1; logic v0, v1, h0, h1;
+  // one candidate set: {ok, hit, entry index, TLB way, entry} (no hit: way 0)
+  function automatic logic [49:0] uset(input logic [3:0] st, input logic cy, input logic [31:12] bs,
+                                       input logic [31:12] of, input logic user, input logic wr, input logic wpb);
+    logic [41:0] e0, e1; logic [1:0] w0, w1; logic [2:0] l0, l1; logic v0, v1, h0, h1;
+    logic [31:12] t0x, t1x;
+    e0 = '0; e1 = '0; w0 = '0; w1 = '0; v0 = 1'b0; v1 = 1'b0; l0 = '0; l1 = '0;
+    for (int kq = 0; kq < UNS; kq++)
+      if (st == 4'(kq)) begin
+        l0 = ut_lo[(kq * UWY) * 3 +: 3]; l1 = ut_lo[(kq * UWY + UWY - 1) * 3 +: 3];
+        e0 = ut_e[(kq * UWY) * 42 +: 42]; w0 = ut_w[(kq * UWY) * 2 +: 2]; v0 = ut_v[kq * UWY];
+        if (UWY == 2) begin
+          e1 = ut_e[(kq * UWY + UWY - 1) * 42 +: 42]; w1 = ut_w[(kq * UWY + UWY - 1) * 2 +: 2]; v1 = ut_v[kq * UWY + UWY - 1];
+        end
+      end
+    t0x = {e0[41:25], l0}; t1x = {e1[41:25], l1};
+    h0 = v0 && sumeq(bs[31:12+USB], of[31:12+USB], t0x[31:12+USB], cy);
+    h1 = v1 && sumeq(bs[31:12+USB], of[31:12+USB], t1x[31:12+USB], cy);
+    if (UWY == 1) return {1'b0, h0, st, w0, e0};
+    return {(h0 && lp_ok(e0, user, 1'b0, wr, wpb)) || (h1 && lp_ok(e1, user, 1'b0, wr, wpb)),
+            h0 || h1, st[2:0], h1, h1 ? w1 : w0, h1 ? e1 : e0};
+  endfunction
+  function automatic logic [49:0] ufast(input logic [31:0] bs, input logic [31:0] of, input logic user,
+                                        input logic wr, input logic wpb);
+    logic [4:0] s0, s1; logic [12:0] lo; logic [49:0] r0, r1;
     lo = {1'b0, bs[11:0]} + {1'b0, of[11:0]};
-    s0 = {1'b0, bs[14:12]} + {1'b0, of[14:12]};
-    s1 = s0 + 4'd1;
-    e0 = '0; e1 = '0; w0 = '0; w1 = '0; v0 = 1'b0; v1 = 1'b0;
-    for (int q = 0; q < 8; q++) begin
-      if (s0[2:0] == 3'(q)) begin e0 = ut_e[q * 42 +: 42]; w0 = ut_w[q * 2 +: 2]; v0 = ut_v[q]; end
-      if (s1[2:0] == 3'(q)) begin e1 = ut_e[q * 42 +: 42]; w1 = ut_w[q * 2 +: 2]; v1 = ut_v[q]; end
-    end
-    h0 = v0 && sumeq(bs[31:15], of[31:15], e0[41:25], s0[3]);
-    h1 = v1 && sumeq(bs[31:15], of[31:15], e1[41:25], s1[3]);
-    return lo[12] ? {1'b0, h1, 1'b0, s1[2:0], w1, e1} : {1'b0, h0, 1'b0, s0[2:0], w0, e0};
+    s0 = {1'b0, bs[15:12] & 4'(UNS - 1)} + {1'b0, of[15:12] & 4'(UNS - 1)};
+    s1 = s0 + 5'd1;
+    r0 = uset(s0[3:0] & 4'(UNS - 1), s0[USB], bs[31:12], of[31:12], user, wr, wpb);
+    r1 = uset(s1[3:0] & 4'(UNS - 1), s1[USB], bs[31:12], of[31:12], user, wr, wpb);
+    return lo[12] ? r1 : r0;
   endfunction
-  localparam bit UFAST = (UWY == 1) && (USB == 3);
-  wire [49:0] upl_n  = UFAST ? ufast(sbase, bp.off) : ulook(ac_lin[31:12], b_user, b_mrd, bp.pwr, wp);
-  wire [49:0] usl_n  = UFAST ? ufast(ssb, bp.soff)  : ulook(slin[31:12], b_user, 1'b0, 1'b1, wp);
+  localparam bit UFAST = (UWY <= 2) && (USB >= 2) && (UWY * UNS <= 16);
+  wire [49:0] upl_n  = UFAST ? ufast(sbase, bp.off, b_user, bp.pwr, wp) : ulook(ac_lin[31:12], b_user, b_mrd, bp.pwr, wp);
+  wire [49:0] usl_n  = UFAST ? ufast(ssb, bp.soff, b_user, 1'b1, wp) : ulook(slin[31:12], b_user, 1'b0, 1'b1, wp);
 `ifdef SIM
   // (the sum-addressed lookup must agree with the plain one whenever paging is on)
   wire [49:0] upl_r = ulook(ac_lin[31:12], b_user, b_mrd, bp.pwr, wp);
   wire [49:0] usl_r = ulook(slin[31:12], b_user, 1'b0, 1'b1, wp);
   always_ff @(posedge clk)
-    if (UFAST && pg && b_adv && !hold_m && !rst && (upl_n[48:0] != upl_r[48:0] || usl_n[48:0] != usl_r[48:0]))
+    if (UFAST && pg && b_adv && !hold_m && !rst && (upl_n[48:0] != upl_r[48:0] || usl_n[48:0] != usl_r[48:0] ||
+        (UWY > 1 && (upl_n[49] != upl_r[49] || usl_n[49] != usl_r[49]))))
       $fatal(1, "agu: sum-addressed micro-TLB lookup differs: lin %08x %08x p %013x/%013x s %013x/%013x base %08x off %08x ssb %08x soff %08x", ac_lin, slin, upl_n, upl_r, usl_n, usl_r, sbase, bp.off, ssb, bp.soff);
 `endif
   wire        php    = upl_n[48];

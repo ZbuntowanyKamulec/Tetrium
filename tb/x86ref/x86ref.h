@@ -80,6 +80,7 @@ void     ref_set_flags(uint32_t mask, uint32_t val);
 #define REF_STEP_FAULT  1    /* an exception was delivered instead / as well */
 #define REF_STEP_HALT   2    /* HLT executed, now halted */
 #define REF_STEP_RESET  4    /* triple fault: the CPU was reset */
+uint32_t ref_phys(uint32_t lin);                              /* linear -> physical, no side effects */
 int      ref_step(void);
 uint64_t ref_cycles(void);   /* 86Box's i486 clock count (its tsc) so far */
 /* The DUT was interrupted inside the REP string instruction at CS:EIP with
