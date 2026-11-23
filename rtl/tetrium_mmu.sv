@@ -10,8 +10,8 @@
 //  * read ports: D (M-stage replay), F (fetch page change), K (walker, TR6)
 //  * data micro-TLB (checked in A2 for the primary and secondary address): 2^UT_SB sets x
 //    UT_WAYS ways (default 16 x 1), set = linear[12 +: UT_SB], each entry a copy of one TLB
-//    entry with its way; a TLB write to that entry, INVLPG, a CR3 write, a TR6 write, a CR0
-//    write or a change of A20M# drops it.  Hits through it touch the entry's LRU bits like a
+//    entry with its way; a TLB write to that entry drops it, INVLPG, a CR3 write, a TR6
+//    write, a CR0 write or a change of A20M# all of them.  Hits through it touch the entry's LRU bits like a
 //    TLB lookup.  (The fetch micro-TLB lives in tetrium_fetch.)
 //  * walker: one request at a time (E before F): TLB lookup; if it misses, lacks the
 //    rights or a write needs D, the page tables are read and updated over the bus
@@ -41,7 +41,7 @@ module tetrium_mmu (
     input  logic        flush_all,       // CR3 write (MOV, task switch)
     input  logic        invlpg_v,
     input  logic [31:12] invlpg_a,
-    input  logic        lp_kill,         // CR0 write: drop the last-page registers
+    input  logic        lp_kill,         // CR0 write: drop the micro-TLBs (fetch and data)
     // test registers
     input  logic        tr_we,           // MOV TRn, r (n = 6, 7)
     input  logic        tr_sel7,         //   TR7 (else TR6)
@@ -64,7 +64,7 @@ module tetrium_mmu (
     output logic        fl_hit,
     output logic [1:0]  fl_way,
     output logic [41:0] fl_e,
-    // LRU touches of last-page register hits: {valid, set, way} x 3 (F, primary, secondary)
+    // LRU touches of micro-TLB hits: {valid, set, way} x 3 (fetch, data primary, secondary)
     input  logic [2:0]  lt_v,
     input  logic [14:0] lt_sw,           // per touch {set[2:0], way[1:0]}
     // data micro-TLB (checked in A2): 2^UT_SB sets x UT_WAYS ways, flattened
@@ -80,10 +80,10 @@ module tetrium_mmu (
     input  logic [31:12] lp_vpn,
     input  logic [41:0] lp_e,
     input  logic [1:0]  lp_way,
-    // TLB write event (the fetch last-page register drops its entry on a match)
+    // TLB write event (the fetch micro-TLB drops its copy of that entry)
     output logic        tw_v,
     output logic [4:0]  tw_sw,           // {set, way}
-    output logic        lpf_kill,        // flush / INVLPG / TR6 write / CR0 write
+    output logic        lpf_kill,        // flush / INVLPG / TR6 write / CR0 write / A20M# change
     // walker requests: E (data) and F (code)
     input  logic        e_req,
     input  logic [31:12] e_a,
@@ -330,7 +330,8 @@ module tetrium_mmu (
   // 2^UT_SB sets (linear[12 +: UT_SB]; 3: the TLB's set; 4: one bit more) x UT_WAYS ways, each entry a copy
   // of one TLB entry with its way.  Loaded by M replay hits and E walks (into the way
   // already holding the page, else an invalid way, else the set's replacement way); a TLB
-  // write to that entry, INVLPG, a CR3 write, a TR6 write or a CR0 write drops it.
+  // write to that entry drops it, INVLPG, a CR3 write, a TR6 write, a CR0 write or an
+  // A20M# change all of them.
   // Replacement: pseudo-LRU over the ways (hits of uops leaving M, loads).
   localparam int USB = `UT_SB, UWY = `UT_WAYS, UNS = 1 << USB, UN = UNS * UWY;
   // (the entries are kept in the flat output vectors: unpacked arrays here crashed Quartus 17
@@ -394,7 +395,7 @@ module tetrium_mmu (
   end
 `endif
   // ---------------------------------------------------------------- state
-  // LRU touches of the last-page hits and the D / F lookups: applied one cycle later
+  // LRU touches of the micro-TLB hits and the D / F lookups: applied one cycle later
   // (they come from the pipeline stall / hit paths)
   logic [4:0]  tq_v;
   logic [24:0] tq_sw;          // {F, D, lt2, lt1, lt0} x {set, way}
@@ -408,9 +409,9 @@ module tetrium_mmu (
       ws <= W_IDLE;
       tr6_q <= '0; tr7_q <= '0;
     end else begin
-      // LRU: last-page hits, D / F lookups used, walker hits and fills, TR6 operations.
+      // LRU: micro-TLB hits, D / F lookups used, walker hits and fills, TR6 operations.
       // One touch per cycle, the highest of: TR6 > TLB write > walker hit > F > D > the
-      // last-page hits (several in a cycle only with paging on, where the LRU order is an
+      // micro-TLB hits (several in a cycle only with paging on, where the LRU order is an
       // approximation of the i486's per-access lookups anyway; TR6 / TR7 tests see one)
       begin
         logic [7:0] sv; logic [2:0] ss [8]; logic [1:0] sw [8];

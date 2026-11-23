@@ -6,8 +6,8 @@
 //      applied), A-origin register updates, A-executed ops, early branches,
 //      scoreboard for the GPR / CS / DF / T0 sources
 //  A2: linear address = segment base + offset, D-cache row address (into the BRAM),
-//      secondary (store) address; segment interlock (same distance from E as the
-//      old single A stage)
+//      secondary (store) address, the limit / rights descriptors of both accesses
+//      (compared in M), data micro-TLB lookup; segment interlock
 //  A1 register view: the A-copy plus the E write being applied this cycle and the
 //  A-executed result of the previous uop (no wait for the A-copy write), plus the
 //  data of a plain load in E once it is final (load -> address: 2 stall cycles)
@@ -67,6 +67,7 @@ module tetrium_agu (
     input  logic [31:0] e_gdtb,        // GDTR / LDTR / TR bases (system table accesses)
     input  logic [31:0] e_ldtb,
     input  logic [31:0] e_trb,
+    input  logic [31:0] e_trl,          // TSS limit
     input  logic [15:0] e_gdtl,        // table limits: a descriptor / gate read beyond is not done
     input  logic [15:0] e_idtl,        //   (E raises the #GP; no translation, no A bit, no #PF)
     input  logic [31:0] e_ldtl,
@@ -147,7 +148,7 @@ module tetrium_agu (
     output logic [1:0]  m_amis,        // {secondary, primary} access misaligned (#AC if enabled, decided in E)
     output logic [2:0]  m_xc,          // exception of the uop: 0 none, 1 #UD, 2 #GP, 3 #SS (combinational in M)
     output logic        m_xs,          // ... found only on the secondary (store) address
-    // paging: last-page registers (MMU) checked in A2; M replays a miss through the TLB
+    // paging: data micro-TLB (MMU) checked in A2; M replays a miss through the TLB
     input  logic        pg,            // CR0.PG (and PE)
     input  logic        wp,            // CR0.WP
     input  logic [1:0]  e_cpl,
@@ -165,12 +166,12 @@ module tetrium_agu (
     output logic        dl_wr,
     input  logic        dl_okp,
     input  logic        dl_okw,
-    output logic        m_rp,          // M replays a last-page miss this cycle (M holds)
+    output logic        m_rp,          // M replays a micro-TLB miss this cycle (M holds)
     input  logic        x_act,         // E's late port has the D-cache read port this cycle
     output logic        mlp_p_ld,      // load the micro-TLB from the replay lookup (primary / secondary)
     output logic        mlp_s_ld,
     output logic [31:12] mlp_vpn,
-    output logic [2:0]  lt_v,          // LRU touches of last-page hits {-, secondary, primary}
+    output logic [2:0]  lt_v,          // LRU touches of micro-TLB hits {-, secondary, primary}
     output logic [14:0] lt_sw,
     output logic [31:12] m_pppn,       // physical page of the primary / secondary access
     output logic        m_pok,         //   usable: rights (and D for a write) checked
@@ -291,6 +292,8 @@ module tetrium_agu (
   // ---------------------------------------------------------------- EA
   logic [31:0] disp2;      // displacement of the second part of a far pointer
   // (0F 01: SGDT / SIDT / LGDT / LIDT, the base after the 16-bit limit at either size)
+  // (registered from the instruction's fields: valid from its second uop on, so an EA2
+  //  uop is never the first of a sequence)
   always_ff @(posedge clk) disp2 <= c_disp + ((c_os32 && !(c_pg && c_op == 8'h01)) ? 32'd4 : 32'd2);
 
   wire [7:0]  bsel = a_sel[AS_B +: 8];
@@ -419,7 +422,7 @@ module tetrium_agu (
   function automatic logic misal(input logic [1:0] a, input logic [1:0] n);
     return (n == 2'd1) ? a[0] : (n == 2'd3) ? (a != 2'd0) : 1'b0;
   endfunction
-  assign m_amis = {q_schk && misal(m_slin[1:0], q_sl[LC_N +: 2]), q_pchk && misal(m_lin[1:0], q_pl[LC_N +: 2])};
+  assign m_amis = {q_schk && misal(m_slin[1:0], q_sl[LC_N +: 2]), q_pchk && !m_noacc && misal(m_lin[1:0], q_pl[LC_N +: 2])};
   assign m_xc = cflt ? 3'd2 : q_ud ? 3'd1 : pflt ? (q_pss ? 3'd3 : 3'd2) : sflt ? (q_sss ? 3'd3 : 3'd2) : 3'd0;
   // (the load of such a uop is translated first: its #PF comes before the store's fault,
   // as the 386 microcode reads before it forms the store address: MOVS, PUSH m)
@@ -704,7 +707,9 @@ module tetrium_agu (
     a1p.pss      = ssel[2];
     a1p.pnb1     = (psz == 2'd0) ? 2'd0 : (psz == 2'd1) ? 2'd1 : 2'd3;
     a1p.prd      = u_mrd;
-    a1p.pwr      = (u_wr == WR_PRI) && !u_cmp;   // (CMP r/m: the uop has a W slot, never writes)
+    // (CMP r/m: the uop has a W slot, never writes; CMPXCHG's read is checked as a write, segment
+    // and page: the destination is always written, the old value on a mismatch)
+    a1p.pwr      = ((u_wr == WR_PRI) && !u_cmp) || ((eop == E_CMP) && (amode == AM_EA));
     a1p.schk     = (u_wr == WR_SEC) && !s_dsca && !killrep && !uskip;
     a1p.sss      = s_push;
     a1p.snb1     = (szb == 3'd1) ? 2'd0 : (szb == 3'd2) ? 2'd1 : 2'd3;
@@ -804,7 +809,7 @@ module tetrium_agu (
   wire  n_tbad = (bp.tgt > sl[1]);
 
   // ---------------------------------------------------------------- paging: micro-TLB check
-  // The page of each access is looked up in the data micro-TLB (set linear[14:12]); the
+  // The page of each access is looked up in the data micro-TLB (set linear[12 +: UT_SB]); the
   // physical page and the rights check for the uop's access go to M with it.  A miss
   // (paging on) makes M replay the uop through the TLB (one cycle per address).
   //   entry {tag[16:0], ppn[19:0], U, W, D, PCD, PWT}
@@ -821,11 +826,15 @@ module tetrium_agu (
   // without reading the GDT, which with paging would set the page's accessed bit)
   wire        b_oob  = e_pm && ((b_ssel[6] && (((bp.off | 32'd7) > {16'h0, e_gdtl}) || (bp.off[31:3] == 29'h0))) ||
                                 (b_ssel[7] && ((bp.off | 32'd7) > e_ldtl)) ||
-                                (b_ssel[8] && ((bp.off | 32'd7) > {16'h0, e_idtl})));
-  wire        pgacc  = (b_mrd || bp.pwr) && !b_oob;   // the uop accesses its primary / secondary address
+                                (b_ssel[8] && ((bp.off | 32'd7) > {16'h0, e_idtl}))) ||
+                     // (the I/O permission bitmap word, also in V86: E raises #GP(0); none of it is read)
+                     (b_ssel[9] && (bp.off > e_trl));
+  // (RPROBE: limit / rights check only, the address is not accessed)
+  wire        b_nacc = b_oob || (bp.uw[UW_EOP_L +: UW_EOP_W] == 7'(E_RPROBE));
+  wire        pgacc  = (b_mrd || bp.pwr) && !b_nacc;  // the uop accesses its primary / secondary address
   wire        sgacc  = (b_wr == WR_SEC);
   // micro-TLB lookup: {ok (hit with the rights of the access), hit, micro way, TLB way, entry};
-  // the rights are checked on both ways of the set in parallel with the tag compares
+  // the rights are checked on every way of the set in parallel with the tag compares
   localparam int USB = `UT_SB, UWY = `UT_WAYS, UNS = 1 << USB;
   function automatic logic [49:0] ulook(input logic [31:12] a, input logic user, input logic rd, input logic wr,
                                         input logic wpb);
@@ -927,7 +936,7 @@ module tetrium_agu (
   assign mlp_p_ld = m_valid && q_rpp && dl_hit;
   assign mlp_s_ld = m_valid && !q_rpp && q_rps && dl_hit;
   assign mlp_vpn  = dl_a;
-  // last-page hits touch the TLB LRU bits when the uop leaves M
+  // micro-TLB hits touch the TLB LRU bits when the uop leaves M
   wire   m_go   = m_valid && !hold_m;
   assign lt_v   = {1'b0, pg && m_go && q_sacc && q_shit, pg && m_go && q_pacc && q_phit};
   assign lt_sw  = {5'd0, m_slin[14:12], q_sway, m_lin[14:12], q_pway};
@@ -952,7 +961,7 @@ module tetrium_agu (
       m_slin4 <= slin4[31:2];
       // paging (off: identity, all rights)
       q_pacc  <= pgacc;
-      m_noacc <= b_oob;
+      m_noacc <= b_nacc;
       q_sacc  <= sgacc;
       q_phit  <= php;
       q_shit  <= shp;

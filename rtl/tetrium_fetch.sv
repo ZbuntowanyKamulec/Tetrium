@@ -3,8 +3,9 @@
 // Tetrium fetch stage (F)
 //  * IC_KB, IC_WAYS-way set associative I-cache (tree PLRU), LINE_B lines
 //    (tetrium_cfg.svh), 8 bytes read per cycle from every way, hit way selected
-//  * BRAM BTB (one branch per 8-byte block) read with the I-cache; a predicted
-//    taken block costs one bubble (the target is read in the next cycle)
+//  * BRAM BTB (two ways: two branches per 8-byte block) read with the I-cache; a
+//    predicted taken block costs one bubble (the target is read in the next cycle);
+//    an indirect target cache for indirect near JMP / CALL
 //  * direction: gselect counters in BRAM indexed by {folded global history,
 //    block address}, read with the BTB (see "direction predictor")
 //  * 8-entry return address stack
@@ -83,7 +84,7 @@ module tetrium_fetch #(
     output logic        snp_hit,       // an external snoop hit a valid I-cache line
     output logic        smc_busy,      // its invalidations are not all written yet
     output logic        smc_hold,      // hold W (invalidation queue filling up)
-    // paging: the fetch last-page register, TLB F port, walker (non-speculative: only
+    // paging: the fetch micro-TLB, TLB F port, walker (non-speculative: only
     // once the pipeline has drained and decode waits for these bytes), page fault
     input  logic        pg,
     input  logic        cpl3,
@@ -95,7 +96,7 @@ module tetrium_fetch #(
     input  logic        lpf_kill,
     input  logic        tw_v,
     input  logic [4:0]  tw_sw,
-    output logic        lt_v,          // LRU touch of the last-page entry (pushed block)
+    output logic        lt_v,          // LRU touch of the micro-TLB entry's TLB entry (pushed block)
     output logic [4:0]  lt_sw,
     input  logic        fe_drained,
     output logic        f_req,

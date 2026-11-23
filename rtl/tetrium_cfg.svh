@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 ZbuntowanyKamulec
-// Tetrium cache configuration (override with +define+NAME=value)
+// Tetrium configuration: caches, CPU identification, debug registers, TLBs, bus width
+// (override with +define+NAME=value)
 `ifndef TETRIUM_CFG_SVH
 `define TETRIUM_CFG_SVH
 `ifndef LINE_B
@@ -38,14 +39,14 @@
 `ifndef UT_WAYS
 `define UT_WAYS 1
 `endif
-// L2 TLB behind the TLB, looked up by the walker: 2^L2TLB_AB entries (0: none) in
-// L2TLB_WAYS ways (1, 2 or 4), one block RAM each (Cyclone V: 1024 x 4 ways = 4 M10K, as
-// direct-mapped)
-// fetch micro-TLB (replaces the fetch last-page register): 2^FUT_SB entries direct-mapped
-// by linear[12 +: FUT_SB], LUT RAM; a fetch from a page it holds needs no TLB lookup
+// fetch micro-TLB: 2^FUT_SB entries direct-mapped by linear[12 +: FUT_SB], LUT RAM; a
+// fetch from a page it holds needs no TLB lookup
 `ifndef FUT_SB
 `define FUT_SB 4
 `endif
+// L2 TLB behind the TLB, looked up by the walker: 2^L2TLB_AB entries in all (0: none) in
+// L2TLB_WAYS ways (1, 2 or 4), one block RAM each (Cyclone V: 1024 entries in 4 ways =
+// 4 M10K, the same as direct-mapped)
 `ifndef L2TLB_AB
 `define L2TLB_AB 10
 `endif

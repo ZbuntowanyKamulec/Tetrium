@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 ZbuntowanyKamulec
-# i486 additions: CPUID (leaves 0, 1, 2), EFLAGS.AC / ID writable, the alignment check
-# (#AC(0), CR0.AM + EFLAGS.AC at CPL 3): ring 0 never checked, ring 3 loads / stores / pushes /
-# string sources and destinations, bytes and aligned accesses never fault, a limit fault
-# comes before #AC, AC cleared and set again by POPFD at ring 3, LES (offset dword), and V86
-# mode.  The #AC / #GP handlers log (vector << 16 | error code, pushed EIP) and resume at
-# [resume].  Segments 08 / 10 / 18 / 20 have base 10000 (the program).
+# i486 additions: CPUID (leaves 0, 1, 2), BSWAP (ESP too), EFLAGS.AC / ID writable, the
+# alignment check (#AC(0), CR0.AM + EFLAGS.AC at CPL 3): ring 0 never checked, ring 3 loads /
+# stores / pushes / string sources and destinations, bytes and aligned accesses never fault, a
+# limit fault comes before #AC, AC cleared and set again by POPFD at ring 3, LES (offset
+# dword), and V86 mode.  The #AC / #GP handlers log (vector << 16 | error code, pushed EIP)
+# and resume at [resume].  Segments 08 / 10 / 18 / 20 have base 10000 (the program).
 .intel_syntax noprefix
 .macro desc base, limit, acc, fl
     .word (\limit) & 0xFFFF
@@ -52,6 +52,18 @@ start:
     cpuid
     logr eax
     logr ebx
+    # ---- BSWAP, ESP included (swapped twice: the stack is not used in between)
+    mov  eax, 0x11223344
+    bswap eax
+    logr eax
+    mov  ebp, 0x8899AABB
+    bswap ebp
+    logr ebp
+    mov  edx, esp
+    bswap esp
+    mov  ecx, esp
+    bswap esp
+    logr ecx
     # ---- EFLAGS: AC and ID flip, then restored
     pushfd
     pop  eax

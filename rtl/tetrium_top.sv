@@ -73,6 +73,6 @@ module tetrium_top #(
       .intr, .nmi, .sstep(1'b0), .stop_req(1'b0), .a20m, .snoop_v, .snoop_line, .flush, .cflush, .cwback,
       .halted, .shutdown, .retire, .idle, .dbg_gpr, .dbg_seg, .dbg_ip, .dbg_flags, .dbg_perf,
       .dbg_sbase(), .dbg_slim(), .dbg_sattr(), .dbg_cr0(), .dbg_cpl(), .dbg_sys(),
-      .dbg_ret_inj(), .dbg_ret_dbt(), .dbg_dr6(), .dbg_dr7(), .dbg_st_v(), .dbg_st_sz(), .dbg_st_lin(), .dbg_st_lin4(), .dbg_st_data(),
+      .dbg_ret_inj(), .dbg_ret_dbt(), .dbg_nmi_ack(), .dbg_dr6(), .dbg_dr7(), .dbg_st_v(), .dbg_st_sz(), .dbg_st_lin(), .dbg_st_lin4(), .dbg_st_data(),
       .dbg_pw_v(), .dbg_pw_adr(), .dbg_pw_dat());
 endmodule

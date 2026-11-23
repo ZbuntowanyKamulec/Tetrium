@@ -167,6 +167,7 @@ module tetrium_exec #(
     output logic [31:0] e_gdtb,         // GDTR / LDTR / TR bases (system table accesses in A2)
     output logic [31:0] e_ldtb,
     output logic [31:0] e_trb,
+    output logic [31:0] e_trl,          // TSS limit (A2: a TSS access beyond it is not made)
     output logic [15:0] e_gdtl,         // GDTR / IDTR / LDTR limits (descriptor reads beyond: no access)
     output logic [15:0] e_idtl,
     output logic [31:0] e_ldtl,
@@ -216,7 +217,7 @@ module tetrium_exec #(
     output logic [1:0]  w_sz,
     output logic [31:0] w_data,
     output logic        w_two,
-    output logic        w_nowr,         // the W store only serves forwarding (writes nothing)
+    output logic        w_nowr,         // the W store writes nothing (accessed bit already set, ARPL no change)
     input  logic [31:0] w_d0,           // aligned data of the store in W (late forwarding)
     input  logic [31:0] w_d1,
     // redirect / flush (registered)
@@ -276,6 +277,7 @@ module tetrium_exec #(
     output logic        retire,
     output logic        retire_inj,     // the retired sequence was injected (interrupt / exception entry)
     output logic        retire_dbt,     // the retired instruction is followed by a debug trap (TF / data breakpoint)
+    output logic        nmi_ack,        // an NMI is taken (its delivery follows; testbench)
     output logic [31:0] dbg_dr6,
     output logic [31:0] dbg_dr7
 );
@@ -401,6 +403,7 @@ module tetrium_exec #(
   assign e_gdtb = gdtb;
   assign e_ldtb = ldt_base;
   assign e_trb  = tr_base;
+  assign e_trl  = tr_lim;
   assign e_gdtl = gdtl;
   assign e_idtl = idtl;
   assign e_ldtl = ldt_lim;
@@ -1830,7 +1833,10 @@ module tetrium_exec #(
   wire [15:0] sv_sel = s[srf];
   wire [7:0]  sv_acc = a_sacc[srf*8 +: 8];
   wire [1:0]  sv_cpl = tx[2][1:0];
-  wire        sv_ok_r = ({16'h0, sv_sel[15:3], 3'b111} <= (sv_sel[2] ? ldt_lim : {16'h0, gdtl})) &&
+  // (a null selector with RPL > 0 is nulled too, as 86Box and Bochs do: its hidden access byte
+  // is not a descriptor's)
+  wire        sv_ok_r = (sv_sel[15:2] != 14'h0) &&
+                       ({16'h0, sv_sel[15:3], 3'b111} <= (sv_sel[2] ? ldt_lim : {16'h0, gdtl})) &&
                        sv_acc[4] && (!sv_acc[3] || sv_acc[1]) &&                       // data / readable code
                        ((sv_acc[3] && sv_acc[2]) ||                                    // conforming
                         ((sv_sel[1:0] <= sv_acc[6:5]) && (sv_cpl <= sv_acc[6:5])));
@@ -2045,7 +2051,8 @@ module tetrium_exec #(
   wire        uj_take = complete && !fault_x && uj_c;     // (a micro-jumping uop is no Jcc / MOV CR0)
   wire [4:0]  uj_id   = uj_k;
   // (into a new task: its TSS size, for the error code push)
-  wire        uj_os32 = (eop == E_LDTSK) ? t3[11] : ((ck == CK_INTG) || dcg_q) ? uj_b11 : os32;
+  // (dcg_q reads B as a descriptor: only a DHI's B is one; an IRET's EFLAGS can look like a call gate)
+  wire        uj_os32 = (eop == E_LDTSK) ? t3[11] : ((ck == CK_INTG) || (dcg_q && (eop == E_DHI))) ? uj_b11 : os32;
   // interrupt / exception entry by mode
   wire [4:0]  int_id  = (cr0[0] || vm) ? 5'(INJ_INT_PM) : 5'(INJ_INT_RM);
   // CALL r/m (pushes), far CALL (9A, FF /3; not the interrupt sequence's JFAR); near RET, RETF
@@ -2060,7 +2067,7 @@ module tetrium_exec #(
   wire repz_end = repz && rep[1] && (az != rep[0]) && cxnz;   // ZF of the compare
 
   // interrupts
-  logic nmi_q, nmi_pend;
+  logic nmi_q, nmi_pend, nmi_blk;
   // (a REP iteration that counted (E)CX down to 0 is no boundary: the RETIRE marker behind it
   // ends the instruction, with its traps and interrupts)
   wire boundary  = last || (bnd && cxnz);
@@ -2072,7 +2079,12 @@ module tetrium_exec #(
   // debug traps too
   wire inh_ss    = sw_en && sw_r == 3'd2 && !pg && eop != E_JFAR && eop != E_IRET;
   wire sets_inh  = inh_ss || ((eop == E_FLAGOP) && (op == 8'hFB) && !ifl);
-  wire take_nmi  = nmi_pend;
+  // (NMI is blocked from its delivery up to the next IRET, which itself ends unblocked: a
+  // pending NMI is taken right after it)
+  wire iret_end  = last && !pg && (op == 8'hCF);
+  wire take_nmi  = nmi_pend && (!nmi_blk || iret_end);
+  // (out of HLT; shutdown is left by NMI in any case)
+  wire nmi_go    = nmi_pend && (!nmi_blk || shutdown);
   wire take_intr = intr && n_if;
   // data breakpoints: the matches of the instruction's accesses (a store that is really
   // made), collected up to its end (a REP iteration's end; held over the instruction after
@@ -2089,7 +2101,14 @@ module tetrium_exec #(
   logic       tsk_tb;
   // (data breakpoints and the T bit also at the end of an interrupt / exception delivery:
   // before the handler's first instruction)
-  wire take_trap = (tf && !inj) || take_dbt || tsk_tb;
+  logic        first;          // the uop in E is the first of its instruction / iteration
+  logic        tswl;           // the state of a new task is being loaded (TSWL)
+  // (single step: TF as the instruction started; a task switch loads the new task's TF
+  // before its last uop, and that TF traps after the new task's first instruction)
+  logic tf_st;
+  wire  tf_start  = (first && !tswl) ? tf : tf_st;
+  always_ff @(posedge clk) if (complete && first && !tswl) tf_st <= tf;
+  wire take_trap = (tf_start && !inj) || take_dbt || tsk_tb;
   wire want_int  = iend && ((!sets_inh && (take_nmi || take_intr)) || (!inh_ss && take_trap));
 
   // ================================================================ commit
@@ -2152,8 +2171,6 @@ module tetrium_exec #(
   end
   // (E)SP, (E)DI and (E)CX at the start of the instruction (or REP iteration) in E:
   // the registers an earlier uop of the same instruction may have advanced
-  logic        first;          // the uop in E is the first of its instruction / iteration
-  logic        tswl;           // the state of a new task is being loaded (TSWL)
   logic        uj_q;           // flush of a micro-jump (the instruction continues)
   always_ff @(posedge clk) uj_q <= !rst && uj_take && (eop != E_LDTSK);
   logic [31:0] esp0, edi0, ecx0;
@@ -2240,9 +2257,15 @@ module tetrium_exec #(
     if (!rst && complete) begin
       // RF: cleared as an instruction (REP iteration) starts; set in the image an
       // instruction breakpoint pushes (86Box's debug-register path)
-      if (DEBUG_REGS && first && !inj) rf <= ibf;
+      // (not in the load of a new task, whose uops all count as first: RF comes from its TSS)
+      if (DEBUG_REGS && first && !inj && !tswl) rf <= ibf;
       // a fault after an SS load of the same instruction: SS (selector, B) back to its start value
       if (fault_x && ss_chg) begin s[2] <= ss0_sel; ss_b <= ss0_b; end
+      // a task switch whose LDT selector faults (#TS) leaves it in LDTR, the cache unusable
+      // (SDM task switch: the selector is loaded, then checked)
+      if (fault_x && ck == CK_TLDT && (eop == E_DLO || eop == E_DHI)) begin
+        ldt_sel <= dsel; ldt_base <= 32'h0; ldt_lim <= 32'h0;
+      end
       if (wcommit_x) begin
         if (sw_en && !(eop == E_SEGVAL && sv_ok)) s[sw_r] <= sw_v;
         if (sw_en && sw_r == 3'd2) ss_b <= (eop == E_DHI) ? B[22] : (vm || ck == CK_V86) ? 1'b0 : ss_b;
@@ -2363,6 +2386,8 @@ module tetrium_exec #(
         if (retire_dbt_n && tf) dr6_h[2] <= 1'b1;
         if (retire_dbt_n && tsk_tb) dr6_h[3] <= 1'b1;
         if (db_entry) dr7[13] <= 1'b0;
+        // (a task switch clears the local enables L0-L3)
+        if (wcommit && (eop == E_LDTSK)) begin dr7[0] <= 1'b0; dr7[2] <= 1'b0; dr7[4] <= 1'b0; dr7[6] <= 1'b0; end
       end
       if (wcommit_x && (eop == E_TWR) && !op[2])
         if (!modrm[5]) begin
@@ -2469,9 +2494,14 @@ module tetrium_exec #(
       shutdown <= 1'b0;
       nmi_q <= 1'b0;
       nmi_pend <= 1'b0;
+      nmi_blk <= 1'b0;
+      nmi_ack <= 1'b0;
     end else begin
       nmi_q <= nmi;
       if (nmi && !nmi_q) nmi_pend <= 1'b1;
+      nmi_ack <= ext_nmi || (halted && nmi_go);
+      if (ext_nmi || (halted && nmi_go)) nmi_blk <= 1'b1;
+      else if (complete && !do_inj && !uj_take && iret_end) nmi_blk <= 1'b0;
       case (xs)
         X_IDLE: begin
           if (act && !ldwait && !fsel_any && start_mul && !hold_w) begin
@@ -2582,9 +2612,9 @@ module tetrium_exec #(
       if (complete && do_halt && !want_int) halted <= 1'b1;
       if (complete && triple) begin halted <= 1'b1; shutdown <= 1'b1; end
       // (shutdown: left by NMI (or RESET) only, as on the 486)
-      if (halted && (nmi_pend || (!shutdown && intr && ifl))) begin
+      if (halted && (nmi_go || (!shutdown && intr && ifl))) begin
         halted <= 1'b0; shutdown <= 1'b0;
-        if (!nmi_pend) xs <= X_INTA;
+        if (!nmi_go) xs <= X_INTA;
         else nmi_pend <= 1'b0;
       end
     end
@@ -2683,9 +2713,9 @@ module tetrium_exec #(
         rd_fetch <= !do_inj && !want_int && !uj_take && !(stop_req && (last || repz_end)) &&
                     ((sstep && (last || repz_end) && !do_halt) || (!do_halt && (redir || repz_end || smcf)));
       end
-      if (halted && (nmi_pend || (!shutdown && intr && ifl))) begin
+      if (halted && (nmi_go || (!shutdown && intr && ifl))) begin
         flush_r <= 1'b1; rd_stop <= 1'b1;
-        rd_inject <= nmi_pend;
+        rd_inject <= nmi_go;
         rd_vec <= 8'd2; rd_imm <= 32'd2;
         rd_injid <= int_id; rd_ips <= ip_arch; rd_ipn <= ip_arch; rd_os32 <= 1'b0; rd_op <= 8'hCD; rd_int <= 1'b1;
         rd_ecvx <= 1'b0;

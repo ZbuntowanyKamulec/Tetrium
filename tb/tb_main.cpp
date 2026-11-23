@@ -153,6 +153,9 @@ struct Sim {
     Bus bus;
     long cyc = 0;
     long irq_per = 0, irq_next = 0, n_inta = 0;   // -i N: raise INTR every N cycles
+    long nmi_per = 0, n_nmi = 0;                   // LOCKNMI=N: an NMI edge every N cycles (lockstep)
+    bool nmi_seen = false, nmi_new = false;        // an NMI taken (new: this cycle, after its retire)
+    uint32_t nmi_ecx = 0, inta_ecx = 0;            // ECX when NMI / INTR was taken (a REP left there)
     int a20m = 1;           // A20 masked: 20-bit address wrap for the real-mode tests
     // lockstep: stores leaving W (program order, byte granular), INTA since the last retire
     bool lock = false, inta_seen = false;
@@ -240,9 +243,10 @@ struct Sim {
         { bool sv; uint32_t sl = 0; dma.tick(mem, sv, sl); top->snoop_v = sv; if (sv) top->snoop_line = sl; }
         top->wb_stall = bus.rnd ? ((bus.rnd32() & 7) == 0) : 0;
         if (irq_per && !top->intr && cyc >= irq_next) top->intr = 1;
+        if (nmi_per) top->nmi = cyc >= nmi_per && (cyc % nmi_per) < 2;      // (from the first period on)
         top->eval();
         if (top->wb_cyc && top->wb_stb && !top->wb_stall) {
-            if (top->wb_tga == 2) { top->intr = 0; irq_next = cyc + irq_per; n_inta++; inta_seen = true; }
+            if (top->wb_tga == 2) { top->intr = 0; irq_next = cyc + irq_per; n_inta++; inta_seen = true; inta_ecx = top->dbg_gpr[1]; }
             long t = cyc + (bus.rnd ? 1 + (bus.rnd32() % 4) : bus.lat);
             if (t <= bus.last_ack) t = bus.last_ack + 1;
             bus.last_ack = t;
@@ -266,6 +270,7 @@ struct Sim {
             for (int k = 0; k < 4; k++)
                 dq.push_back({(((uint32_t)top->dbg_pw_adr << 2) + k) & 0xFFFFFF, (uint8_t)(top->dbg_pw_dat >> (8 * k))});
         top->clk = 1; top->eval();
+        if (top->dbg_nmi_ack) { nmi_new = true; n_nmi++; nmi_ecx = top->dbg_gpr[1]; }
 #ifdef TRACE
         if (tfp && tglob >= tstart && tglob < tstart + tlen) tfp->dump((uint64_t)(tglob * 2));
         tglob++;
@@ -565,11 +570,31 @@ static void put_desc(uint32_t a, uint32_t base, uint32_t lim, uint8_t acc, uint8
     mem[a] = lim; mem[a + 1] = lim >> 8; mem[a + 2] = base; mem[a + 3] = base >> 8; mem[a + 4] = base >> 16;
     mem[a + 5] = acc; mem[a + 6] = ((lim >> 16) & 0xF) | (fl << 4); mem[a + 7] = base >> 24;
 }
-static void rpm_tables(const uint16_t *ivt, uint16_t cs) {
-    const uint32_t G = 0x80000, I = 0x8C000;
+// d32 ('RPMD' / 'RPGD', tests/rgen386.py --d32): the code segment is 32-bit; ring ('RPMU' / 'RPMW',
+// 'RPGU' / 'RPGW', --r3, W: 32-bit; P / Q ring 2, X / Y ring 1): the program runs at that ring
+// (code, stack and data DPL the ring, a 386 TSS
+// 68 with SS0:ESP0 = 60:FFFE and an I/O permission bitmap for ports 0-3FF, IDT gates DPL 3 but a
+// quarter DPL 0).  Either way the handlers (16-bit code at the same base) are reached through
+// selector 38
+// v86 ('RPMV' / 'RPGV', --v86): real-mode programs in V86 mode, the TSS as for r3, 32-bit gates
+static void rpm_tables(const uint16_t *ivt, uint16_t cs, bool d32, int ring, bool v86, uint32_t seed) {
+    const uint32_t G = 0x80000, I = 0x8C000, T = 0x8F000;
+    const bool r3 = ring > 0;                                       // (an outer ring)
+    const uint8_t dpl = ring << 5;
     memset(mem + G, 0, 0xB008);
-    put_desc(G + cs, cs << 4, 0xFFFF, 0x9B, 0);
-    for (uint16_t sg : {0x3000, 0x4000, 0x5000, 0x7000, 0xB000}) put_desc(G + sg, sg << 4, 0xFFFF, 0x93, 0);
+    put_desc(G + cs, cs << 4, 0xFFFF, 0x9B | dpl, d32 ? 4 : 0);
+    for (uint16_t sg : {0x3000, 0x4000, 0x5000, 0x7000, 0xB000}) put_desc(G + sg, sg << 4, 0xFFFF, 0x93 | dpl, 0);
+    uint32_t x = seed * 2246822519u + 3266489917u;
+    auto rnd = [&](uint32_t n) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return x % n; };
+    if (r3 || v86) {
+        put_desc(G + 0x60, 0x60000, 0xFFFF, 0x93, 0);                // ring 0 stack
+        put_desc(G + 0x68, T, 0xE8, 0x89, 0);                        // 386 TSS, I/O map 68-E7 (+ FF)
+        memset(mem + T, 0, 0xE9);
+        mem[T + 4] = 0xFE; mem[T + 5] = 0xFF; mem[T + 8] = 0x60;    // ESP0, SS0
+        mem[T + 0x66] = 0x68;
+        for (uint32_t k = 0x68; k < 0xE8; k++) mem[T + k] = rnd(3) ? 0 : (uint8_t)rnd(256);
+        mem[T + 0xE8] = 0xFF;
+    }
     put_desc(G + 0x08, 0x30000, 0xFFFF, 0x91, 0);         // read-only
     put_desc(G + 0x10, 0x30000, 0x7FFF, 0x97, 0);         // expand-down: 8000-FFFF
     put_desc(G + 0x18, 0x30000, 0xFFFF, 0x13, 0);         // not present
@@ -581,15 +606,17 @@ static void rpm_tables(const uint16_t *ivt, uint16_t cs) {
     put_desc(G + 0x48, 0x30000, 0xFFFF, 0x93, 0);         // (RPL 3 selector 4B: #GP)
     for (int v = 0; v < 256; v++) {
         uint32_t a = I + v * 8;
-        mem[a] = ivt[v]; mem[a + 1] = ivt[v] >> 8; mem[a + 2] = cs; mem[a + 3] = cs >> 8;
-        mem[a + 4] = 0; mem[a + 5] = 0x86; mem[a + 6] = 0; mem[a + 7] = 0;
+        const uint16_t hs = (d32 || r3 || v86) ? 0x38 : cs;
+        mem[a] = ivt[v]; mem[a + 1] = ivt[v] >> 8; mem[a + 2] = hs; mem[a + 3] = hs >> 8;
+        mem[a + 4] = 0; mem[a + 5] = (v86 ? 0x8E : 0x86) | (((r3 || v86) && rnd(4)) ? 0x60 : 0); mem[a + 6] = 0; mem[a + 7] = 0;
     }
 }
 
 // paging (random programs 'RPG3', tests/rgen386.py --pg): directory 8D000, one table
 // 8E000 for the first MB, identity with random twists from the seed: data pages not
-// present / read-only / aliased (another data frame) / PCD, code pages not present
-// (the program's #PF handler sets P and W); selectors 50 (flat) and 58 (the table)
+// present / read-only / aliased (another data frame) / PCD / supervisor-only, code pages
+// not present / supervisor-only (the program's #PF handler sets P, W and U); selectors 50
+// (flat) and 58 (the table)
 static void rpg_tables(uint32_t seed) {
     const uint32_t G = 0x80000, PD = 0x8D000, PT = 0x8E000;
     put_desc(G + 0x50, 0, 0xFFFFF, 0x93, 0xC);
@@ -607,7 +634,11 @@ static void rpg_tables(uint32_t seed) {
             if (rnd(3) == 0) e &= ~1u;                                       // not present
             if (rnd(4) == 0) e &= ~2u;                                       // read-only
             if (rnd(6) == 0) e |= 0x10;                                      // PCD
-        } else if (p >= 0x10 && p < 0x1F && rnd(3) == 0) e &= ~1u;          // code, not present
+            if (rnd(7) == 0) e &= ~4u;                                       // supervisor only
+        } else if (p >= 0x10 && p < 0x1F) {
+            if (rnd(3) == 0) e &= ~1u;                                       // code, not present
+            if (rnd(7) == 0) e &= ~4u;                                       // ... supervisor only
+        }
         memcpy(mem + PT + p * 4, &e, 4);
     }
 }
@@ -643,8 +674,14 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
         fseek(f, 0, SEEK_END);
     }
     size_t n = lock_rom ? 0 : fread(mg, 1, 4, f);
-    bool rpg = (n == 4) && !memcmp(mg, "RPG3", 4);          // ... with paging
-    bool rpm = (n == 4) && (!memcmp(mg, "RPM3", 4) || rpg);  // the same in 16-bit protected mode
+    // the 4th letter: 3 (16-bit code), D (32-bit), U / W (the same at ring 3), P / Q (ring 2),
+    // X / Y (ring 1), V (V86)
+    const bool rkind = (n == 4) && strchr("3DUWPQXYV", mg[3]) && mg[3];
+    bool rpg = rkind && !memcmp(mg, "RPG", 3);                  // ... with paging
+    bool rpm = rkind && (!memcmp(mg, "RPM", 3) || rpg);         // ... in protected mode
+    bool rd32 = rpm && strchr("DWQY", mg[3]);                   // ... in a 32-bit code segment
+    int rring = !rpm ? 0 : strchr("UW", mg[3]) ? 3 : strchr("PQ", mg[3]) ? 2 : strchr("XY", mg[3]) ? 1 : 0;   // ... at a ring
+    bool rv86 = rpm && mg[3] == 'V';                            // ... in V86 mode
     bool rprog = (n == 4) && (!memcmp(mg, "R386", 4) || rpm);
     if (rprog) {
         bool okh = fread(&seed, 4, 1, f) == 1 && fread(&nret, 4, 1, f) == 1 && fread(gp0, 4, 8, f) == 8 &&
@@ -682,7 +719,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 mem[t + v * 4] = ivt[v] & 0xFF; mem[t + v * 4 + 1] = ivt[v] >> 8;
                 mem[t + v * 4 + 2] = sg0[1] & 0xFF; mem[t + v * 4 + 3] = sg0[1] >> 8;
             }
-        if (rpm) rpm_tables(ivt, sg0[1]);
+        if (rpm) rpm_tables(ivt, sg0[1], rd32, rring, rv86, seed);
         if (rpg) rpg_tables(seed);
     } else if (lock_rom) memcpy(mem + MEM1M - rn, romb, rn);
     else memcpy(mem + 0x10000, img, n);
@@ -693,6 +730,8 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     if (lock_rom) S.top->init_csbase = 0xFFFF0000;
     S.top->init_cr0 = cr0_0;
     S.irq_per = irq; S.lock = true; S.dq.clear(); S.inta_seen = false;
+    S.nmi_per = getenv("LOCKNMI") ? atol(getenv("LOCKNMI")) : 0; S.nmi_seen = false; S.nmi_new = false; S.n_nmi = 0;
+    ref_hold_shutdown(S.nmi_per != 0);     // (with NMIs: shutdown is left by one, in both)
     S.a20m = 0;
     S.reset();
     S.a20m = 1;
@@ -716,6 +755,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     std::map<uint32_t, uint8_t> loose;            // PTE bytes written by one side only so far (see RefWr)
     long ins = 0, nmis = 0, hist[256] = {0};
     bool trap_pending = false, ss_pending = false, done = false;
+    bool ustop = false;            // stopped at an undefined 16-bit SHLD / SHRD (see below)
     bool shut_done = false;
     uint32_t dip_last = 0;
     // a delivery the DUT follows with a debug trap (data breakpoint / T bit): the model ran
@@ -729,6 +769,9 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     int idle = 0;
     long last_ret = 0;
     while (S.cyc < maxcyc && !done) {
+        // (an NMI taken at the end of the instruction retired in the same cycle (an INT n
+        // delivery's, say): its own delivery is the next injected retire)
+        if (S.nmi_new) { S.nmi_seen = true; S.nmi_new = false; }
         S.tick();
         // a hang: nothing retired for 200k cycles (not halted)
         if (S.top->retire) last_ret = S.cyc;
@@ -768,10 +811,19 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                        pre.gpr[4], pre.seg[REF_DS].sel, pre.seg[REF_ES].sel, pre.seg[REF_SS].sel, pre.seg[REF_DS].limit);
             if (inj && model_ahead) {
                 model_ahead = false;                   // (the #DB delivery: done by the model)
+            } else if (inj && S.nmi_seen) {
+                // NMI (possibly inside a REP string instruction); the model must have it unblocked
+                S.nmi_seen = false;
+                ref_step_rep_partial(S.nmi_ecx);
+                if (!ref_nmi() && !nmis) {
+                    snprintf(first, sizeof first, "NMI taken at %08x while blocked (no IRET since the last NMI)", dip);
+                    nmis++;
+                }
+                if (S.top->dbg_ret_dbt) { model_ahead = true; skip = true; }
             } else if (inj && S.inta_seen) {
                 // external interrupt (possibly inside a REP string instruction: CX left = DUT's)
                 S.inta_seen = false;
-                ref_step_rep_partial(dg[1] & 0xFFFF);
+                ref_step_rep_partial(S.inta_ecx);
                 ref_interrupt(8);
                 if (S.top->dbg_ret_dbt) { model_ahead = true; skip = true; }
             } else if (!inj && ((pre.eflags & 0x100) || S.top->dbg_ret_dbt)) {
@@ -822,6 +874,13 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 // protected mode: descriptor caches (non-null selectors), CR0, CPL, LDTR, TR
                 if (post.creg0 & 1) {
                     for (int k = 0; k < 6; k++) {
+                        // a data segment register's null state (any selector: also one loaded in
+                        // real mode stays usable), 86Box: base FFFFFFFF; not in V86
+                        if (k != 1 && !(post.eflags & 0x20000)) {
+                            uint32_t dn = (uint32_t)(((uint64_t)S.top->dbg_sattr >> (k * 10 + 9)) & 1);
+                            uint32_t mn = (post.seg[k].base == 0xFFFFFFFFu);
+                            if (dn != mn) bl += snprintf(buf + bl, sizeof(buf) - bl, " %s.null=%u/%u", SN[k], dn, mn);
+                        }
                         if (!(post.seg[k].sel & 0xFFFC) && k != 1) continue;
                         uint32_t db = S.top->dbg_sbase[k], dl = S.top->dbg_slim[k];
                         uint32_t da = (uint32_t)(((uint64_t)S.top->dbg_sattr >> (k * 10)) & 0x3FF);
@@ -861,6 +920,14 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                     if (it == rq.end() || it->grp != g) {
                         auto lt = loose.find(d.first);
                         if (lt != loose.end() && lt->second == d.second) { loose.erase(lt); S.dq.pop_front(); continue; }
+                        // the DUT's prefetch set the accessed bit of a code page (10-1F, or 20 just
+                        // after the code) the model has not fetched from yet (an interrupt came first,
+                        // or the prefetch ran past the instruction's page): the PTE as the model has it
+                        // with A set; the model takes it over (it would set A itself later)
+                        if (rpg && d.first >= 0x8E000 + 0x10 * 4 && d.first < 0x8E000 + 0x21 * 4 &&
+                            d.second == (rram[d.first] | ((d.first & 3) ? 0 : 0x20))) {
+                            rram[d.first] = d.second; S.dq.pop_front(); continue;
+                        }
                         bl += snprintf(buf + bl, sizeof(buf) - bl, " st[%05x]=%02x/none", d.first, d.second);
                         S.dq.pop_front();
                         if (bl > 400) break;
@@ -886,6 +953,19 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                         bl += snprintf(buf + bl, sizeof(buf) - bl, " out[%03x]=%02x/[%03x]=%02x", dut_o.front().first,
                                        dut_o.front().second, ref_o.front().first, ref_o.front().second);
                     dut_o.pop_front(); ref_o.pop_front();
+                }
+                // a 16-bit SHLD / SHRD by 17-31 (in a random program reached mid-instruction, e.g. through
+                // a return address the program overwrote): the result is undefined (Tetrium gives the
+                // Pentium pattern, 86Box another); the run stops there and counts as passed
+                if (bl && rprog && !inj) {
+                    int o = 0, p66 = 0;
+                    while (o < 13 && (ib[o] == 0x26 || ib[o] == 0x2E || ib[o] == 0x36 || ib[o] == 0x3E || ib[o] == 0xF2 ||
+                                      ib[o] == 0xF3 || ib[o] == 0xF0 || (ib[o] >= 0x64 && ib[o] <= 0x67))) { p66 ^= (ib[o] == 0x66); o++; }
+                    const int csd = (pre.seg[REF_CS].attr >> 10) & 1;
+                    if (!(csd ^ p66) && ib[o] == 0x0F && (ib[o + 1] & 0xF6) == 0xA4) {
+                        const int cnt = (ib[o + 1] & 1) ? (pre.gpr[1] & 31) : (ib[(dip - pre.eip - 1) & 15] & 31);
+                        if (cnt > 16) { ustop = true; done = true; bl = 0; }
+                    }
                 }
                 if (bl) {
                     nmis++;
@@ -939,8 +1019,9 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                     nmis++;
                 }
             }
-            if (++idle > 2) done = true;
-        }
+            // (with LOCKNMI an NMI wakes a HLT: done once halted for two NMI periods)
+            if (++idle > (S.nmi_per ? 2 * S.nmi_per : 2)) done = true;
+        } else if (S.nmi_per) { idle = 0; shut_done = false; }
         if (rprog && ins >= (long)nret) done = true;
     }
     // final memory image (a random program is stopped mid-flight: its stores were compared above)
@@ -985,8 +1066,9 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
         nmis++;
     }
     if (!nmis && done && !md)
-        printf("%-12s LOCK OK insns=%ld cycles=%ld ipc=%.3f ref486=%llu\n", name.c_str(), ins, S.cyc, (double)ins / S.cyc,
-               (unsigned long long)(ref_cycles() - ref_cyc0));
+        printf("%-12s LOCK OK insns=%ld cycles=%ld ipc=%.3f ref486=%llu%s\n", name.c_str(), ins, S.cyc, (double)ins / S.cyc,
+               (unsigned long long)(ref_cycles() - ref_cyc0), (std::string(irq ? " irqs=" + std::to_string(S.n_inta) : "") + (S.nmi_per ? " nmis=" + std::to_string(S.n_nmi) : "") +
+               (ustop ? " (stopped at an undefined 16-bit SHLD / SHRD)" : "")).c_str());
     else {
         printf("%-12s LOCK MISMATCH n=%ld%s first: %s", name.c_str(), nmis, done ? "" : (nmis ? "" : " TIMEOUT"), first);
     if (!done && !nmis) printf(" (insns=%ld cycles=%ld)\n", ins, S.cyc);

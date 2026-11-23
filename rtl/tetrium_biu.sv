@@ -118,7 +118,7 @@ module tetrium_biu #(
   logic [31:0] rq_dat;
   logic        rq_h;          // 16-bit bus: half being issued
   logic [3:0]  outs;          // write beats issued, not yet acked
-  logic        yielded;       // last stream stopped for an I-cache fill
+  logic        yielded;       // last stream stopped for an I-cache fill (never: ws_stop is 0)
   logic        gact;          // 128-bit: fill rows still to be written
 
   // piece of the single access issued (s) / acked (a)
@@ -162,8 +162,9 @@ module tetrium_biu #(
   // stream: load the next entry when the request register is free (or being accepted)
   wire ws_beat  = ws && rq_v && !wb_stall;
   wire ws_acc   = ws_beat && (BB != 2 || rq_h || rq_sel[3:2] == 2'b00);
-  // instruction fills do not overtake stores: the store buffer drains first
-  // (a fill must see code just written; D-fills wait the same way)
+  // fills do not overtake stores: a stream runs until the store buffer is empty (a fill
+  // must see code just written; the job order below also puts stores before fills), so
+  // it never stops early (ws_stop 0: no yielding)
   wire ws_stop  = 1'b0;
   wire [3:0] outs_n = outs + (ws_beat ? 4'd1 : 4'd0) - ((ws && wb_ack) ? 4'd1 : 4'd0);
   wire ws_load  = ws && (!rq_v || ws_acc) && sb_v && !ws_stop && (outs_n < 4'd8);

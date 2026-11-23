@@ -180,7 +180,7 @@ index 837ba3b2b..e3c6b507e 100644
  cpu_386_check_instruction_fault(void)
  {
 diff --git a/src/cpu/386_common.h b/src/cpu/386_common.h
-index 8fa102645..deda97ef7 100644
+index 8fa102645..135d10913 100644
 --- a/src/cpu/386_common.h
 +++ b/src/cpu/386_common.h
 @@ -106,7 +106,7 @@
@@ -192,59 +192,155 @@ index 8fa102645..deda97ef7 100644
  
  #    define do_mmut_rb(s, a, b)                                                                                           \
          if (do_mmut_needed() && (readlookup2[(uint32_t) ((s) + (a)) >> 12] == (uintptr_t) LOOKUP_INV || ((s) == 0xFFFFFFFF))) \
-@@ -198,12 +198,14 @@
+@@ -198,12 +198,15 @@
          break;                                                    \
      }
  
 +/* Tetrium lockstep (a real 486): a start offset above the limit faults also when
-+   offset + size - 1 wraps around 4 GB (test386 POST 12) */
++   offset + size - 1 wraps around 4 GB (test386 POST 12); and one whose end wraps around 4 GB
++   faults too (the SDM leaves a 4 GB limit implementation-specific; Tetrium and Bochs fault) */
  #define CHECK_READ(chseg, low, high)                                                  \
      if ((msw & 1) && !(cpu_state.eflags & VM_FLAG) && (((chseg)->access & 10) == 8)) { \
          x86gpf("Execute-only (READ)", 0);                                             \
          return 1;                                                                     \
      }                                                                                 \
 -    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high)) {                 \
-+    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high)) {                 \
++    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high) || ((uint32_t) (high) < (uint32_t) (low))) {                 \
          SEG_LIMIT_FAULT(chseg);                                                       \
          return 1;                                                                     \
      }                                                                                 \
-@@ -240,7 +242,7 @@
+@@ -240,7 +243,7 @@
      } while (0)
  
  #define CHECK_READ_REP(chseg, low, high)                                         \
 -    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high)) {            \
-+    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high)) {            \
++    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high) || ((uint32_t) (high) < (uint32_t) (low))) {            \
          SEG_LIMIT_FAULT(chseg);                                                  \
          break;                                                                   \
      }                                                                            \
-@@ -257,7 +259,7 @@
+@@ -257,7 +260,7 @@
          x86gpf("Segment can't write", 0);                             \
          return 1;                                                     \
      }                                                                 \
 -    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high)) { \
-+    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high)) { \
++    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high) || ((uint32_t) (high) < (uint32_t) (low))) { \
          SEG_LIMIT_FAULT(chseg);                                       \
          return 1;                                                     \
      }                                                                 \
-@@ -282,7 +284,7 @@
+@@ -282,7 +285,7 @@
          x86gpf("Segment can't write", 0);                                                                                             \
          return 1;                                                                                                                     \
      }                                                                                                                                 \
 -    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low2 < (chseg)->limit_low) || (high2 > (chseg)->limit_high)) { \
-+    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high) || (low2 < (chseg)->limit_low) || (high2 > (chseg)->limit_high) || (low2 > (chseg)->limit_high)) { \
++    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high) || ((uint32_t) (high) < (uint32_t) (low)) || (low2 < (chseg)->limit_low) || (high2 > (chseg)->limit_high) || (low2 > (chseg)->limit_high) || ((uint32_t) (high2) < (uint32_t) (low2))) { \
          SEG_LIMIT_FAULT(chseg);                                                                                                       \
          return 1;                                                                                                                     \
      }                                                                                                                                 \
-@@ -299,7 +301,7 @@
+@@ -299,7 +302,7 @@
          x86gpf("Segment can't write (REP)", 0);                       \
          break;                                                        \
      }                                                                 \
 -    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high)) { \
-+    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high)) { \
++    if ((low < (chseg)->limit_low) || (high > (chseg)->limit_high) || (low > (chseg)->limit_high) || ((uint32_t) (high) < (uint32_t) (low))) { \
          SEG_LIMIT_FAULT(chseg);                                       \
          break;                                                        \
      }                                                                 \
-@@ -971,3 +973,32 @@ x86_lock_legal(int is_0f, uint8_t opcode, uint8_t modrm)
+@@ -317,12 +320,21 @@
+         return 1;                                     \
+     }
+ 
++/* Tetrium lockstep: while the testbench steps (x86ref_clip_on), code bytes on the next page
++   are not fetched for an instruction that ends before it, so that the look-ahead of the
++   opcode fetch does not fault on that page (a 486 faults only when it executes from it);
++   decided per instruction (after MOV / POP SS 86Box runs the next one in the same step) */
++extern int x86ref_clip_on;
++extern int x86ref_clipped(uint32_t a);
++#define X86REF_CLIPPED(a) (x86ref_clip_on && x86ref_clipped(a))
+ #ifdef OPS_286_386
+ /* TODO: Introduce functions to read exec. */
+ static __inline uint8_t
+ fastreadb(uint32_t a)
+ {
+     uint8_t ret;
++    if (X86REF_CLIPPED(a))
++        return 0;
+     read_type = 1;
+     ret = readmembl_2386(a);
+     read_type = 4;
+@@ -335,6 +347,8 @@ static __inline uint16_t
+ fastreadw(uint32_t a)
+ {
+     uint16_t ret;
++    if (X86REF_CLIPPED(a + 1))
++        return fastreadb(a) | (fastreadb(a + 1) << 8);
+     read_type = 1;
+     ret = readmemwl_2386(a);
+     read_type = 4;
+@@ -347,6 +361,8 @@ static __inline uint32_t
+ fastreadl(uint32_t a)
+ {
+     uint32_t ret;
++    if (X86REF_CLIPPED(a + 3))
++        return fastreadw(a) | ((uint32_t) fastreadw(a + 2) << 16);
+     read_type = 1;
+     ret = readmemll_2386(a);
+     read_type = 4;
+@@ -360,6 +376,9 @@ fastreadb(uint32_t a)
+ {
+     uint8_t *t;
+ 
++    if (X86REF_CLIPPED(a))      /* (every page-crossing code read comes here) */
++        return 0;
++
+     if ((a >> 12) == pccache)
+         return *((uint8_t *) (((uintptr_t) &pccache2[a] & 0x00000000ffffffffULL) | ((uintptr_t) &pccache2[0] & 0xffffffff00000000ULL)));
+ 
+@@ -379,7 +398,7 @@ fastreadw(uint32_t a)
+ {
+     uint8_t *t;
+     uint16_t val;
+-    if ((a & 0xFFF) > 0xFFE) {
++    if (((a & 0xFFF) > 0xFFE) || (X86REF_CLIPPED(a + 1))) {
+         val = fastreadb(a);
+         val |= (fastreadb(a + 1) << 8);
+         return val;
+@@ -404,7 +423,7 @@ fastreadl(uint32_t a)
+ {
+     uint8_t *t;
+     uint32_t val;
+-    if ((a & 0xFFF) < 0xFFD) {
++    if (((a & 0xFFF) < 0xFFD) && !(X86REF_CLIPPED(a + 3))) {
+         if ((a >> 12) != pccache) {
+             t = getpccache(a);
+             if (cpu_state.abrt)
+@@ -452,7 +471,7 @@ fastreadw_fetch(uint32_t a)
+     uint16_t ret;
+ 
+     cpu_old_paging = (cpu_flush_pending == 2);
+-    if ((a & 0xFFF) > 0xFFE) {
++    if (((a & 0xFFF) > 0xFFE) || (X86REF_CLIPPED(a + 1))) {
+         ret = fastreadb(a);
+         if (!cpu_state.abrt && (opcode_length[ret & 0xff] > 1))
+             ret |= ((uint16_t) fastreadb(a + 1) << 8);
+@@ -495,7 +514,7 @@ fastreadw_fetch(uint32_t a)
+ {
+     uint8_t *t;
+     uint16_t val;
+-    if ((a & 0xFFF) > 0xFFE) {
++    if (((a & 0xFFF) > 0xFFE) || (X86REF_CLIPPED(a + 1))) {
+         val = fastreadb(a);
+         if (opcode_length[val & 0xff] > 1)
+             val |= (fastreadb(a + 1) << 8);
+@@ -521,7 +540,7 @@ fastreadl_fetch(uint32_t a)
+ {
+     uint8_t *t;
+     uint32_t val;
+-    if ((a & 0xFFF) < 0xFFD) {
++    if (((a & 0xFFF) < 0xFFD) && !(X86REF_CLIPPED(a + 3))) {
+         if ((a >> 12) != pccache) {
+             t = getpccache(a);
+             if (cpu_state.abrt)
+@@ -971,3 +990,32 @@ x86_lock_legal(int is_0f, uint8_t opcode, uint8_t modrm)
  extern int rf_flag_no_clear;
  
  int cpu_386_check_instruction_fault(void);
@@ -278,7 +374,7 @@ index 8fa102645..deda97ef7 100644
 +    return 1;
 +}
 diff --git a/src/cpu/386_dynarec.c b/src/cpu/386_dynarec.c
-index f0b608aec..8530d5d58 100644
+index f0b608aec..9a4dbb6c8 100644
 --- a/src/cpu/386_dynarec.c
 +++ b/src/cpu/386_dynarec.c
 @@ -124,7 +124,9 @@ fetch_ea_32_long(uint32_t rmdat)
@@ -312,7 +408,7 @@ index f0b608aec..8530d5d58 100644
                  ins_fetch_fault = cpu_386_check_instruction_fault();
  
              /* Breakpoint fault has priority over other faults. */
-@@ -1673,9 +1677,21 @@ exec386_common(int32_t cycs, const int dbg)
+@@ -1673,11 +1677,26 @@ exec386_common(int32_t cycs, const int dbg)
                      trap = cpu_state.flags & T_FLAG;
  
                  cpu_state.pc++;
@@ -332,10 +428,16 @@ index f0b608aec..8530d5d58 100644
 +                        dr[6] |= dr6_b_pend;
 +                    dr6_b_pend = 0;
 +                }
++                /* x86ref: a reset inside the instruction (a triple fault while delivering #DE)
++                   ends the step, so the testbench sees it (the outer loop would clear the flag
++                   and run the next instruction) */
                  if (x86_was_reset)
-                     break;
+-                    break;
++                    return;
              }
-@@ -1722,6 +1738,8 @@ block_ended:
+ #ifdef ENABLE_386_LOG
+             else if (in_smm)
+@@ -1722,6 +1741,8 @@ block_ended:
  
                  if (dbg && is386 && !x86_was_reset && ins_fetch_fault)
                      x86gen();
@@ -344,7 +446,7 @@ index f0b608aec..8530d5d58 100644
              } else if (new_ne) {
                  flags_rebuild();
  
-@@ -1735,10 +1753,12 @@ block_ended:
+@@ -1735,10 +1756,12 @@ block_ended:
                      if (trap & 2) dr[6] |= 0x8000;
                      if (trap & 1) dr[6] |= 0x4000;
                      if (trap & 16) dr[6] |= 0x2000;
@@ -532,6 +634,82 @@ index e57ebeb61..5469a2e2b 100644
          for (uint8_t i = 0; i < 4; i++)
              dr[i] = 0x00000000;
          dr[6] = is586 ? 0xffff0ff0 : 0xffff1ff0;
+diff --git a/src/cpu/x86_ops_call.h b/src/cpu/x86_ops_call.h
+index 18a4d87ca..2e0326ba9 100644
+--- a/src/cpu/x86_ops_call.h
++++ b/src/cpu/x86_ops_call.h
+@@ -184,7 +184,7 @@ opFF_w_a16(uint32_t fetchdat)
+     switch (rmdat & 0x38) {
+         case 0x00: /*INC w*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
+@@ -204,7 +204,7 @@ opFF_w_a16(uint32_t fetchdat)
+             break;
+         case 0x08: /*DEC w*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
+@@ -339,7 +339,7 @@ opFF_w_a32(uint32_t fetchdat)
+     switch (rmdat & 0x38) {
+         case 0x00: /*INC w*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
+@@ -359,7 +359,7 @@ opFF_w_a32(uint32_t fetchdat)
+             break;
+         case 0x08: /*DEC w*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
+@@ -495,7 +495,7 @@ opFF_l_a16(uint32_t fetchdat)
+     switch (rmdat & 0x38) {
+         case 0x00: /*INC l*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
+@@ -515,7 +515,7 @@ opFF_l_a16(uint32_t fetchdat)
+             break;
+         case 0x08: /*DEC l*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
+@@ -650,7 +650,7 @@ opFF_l_a32(uint32_t fetchdat)
+     switch (rmdat & 0x38) {
+         case 0x00: /*INC l*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
+@@ -670,7 +670,7 @@ opFF_l_a32(uint32_t fetchdat)
+             break;
+         case 0x08: /*DEC l*/
+             if (cpu_mod != 3) {
+-                SEG_CHECK_READ(cpu_state.ea_seg);
++                SEG_CHECK_WRITE(cpu_state.ea_seg);  /* Tetrium lockstep: read-modify-write, a write */
+                 if (cpu_state.abrt)
+                     return 1;
+                 CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
 diff --git a/src/cpu/x86_ops_inc_dec.h b/src/cpu/x86_ops_inc_dec.h
 index 8b9711aaa..e5bbe2efe 100644
 --- a/src/cpu/x86_ops_inc_dec.h
@@ -561,10 +739,82 @@ index 8b9711aaa..e5bbe2efe 100644
          SEG_CHECK_WRITE(cpu_state.ea_seg);
      temp = geteab();
 diff --git a/src/cpu/x86_ops_misc.h b/src/cpu/x86_ops_misc.h
-index 639c2c029..e22e9a522 100644
+index 639c2c029..607b3621c 100644
 --- a/src/cpu/x86_ops_misc.h
 +++ b/src/cpu/x86_ops_misc.h
-@@ -816,9 +816,15 @@ opBOUND_w_a16(uint32_t fetchdat)
+@@ -63,7 +63,10 @@ opF6_a16(uint32_t fetchdat)
+ 
+     fetch_ea_16(fetchdat);
+     if (cpu_mod != 3) {
+-        SEG_CHECK_READ(cpu_state.ea_seg);
++        if ((rmdat & 0x30) == 0x10)     /* Tetrium lockstep: NOT / NEG read-modify-write: a write */
++            SEG_CHECK_WRITE(cpu_state.ea_seg);
++        else
++            SEG_CHECK_READ(cpu_state.ea_seg);
+         CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr);
+     }
+     dst = geteab();
+@@ -183,7 +186,10 @@ opF6_a32(uint32_t fetchdat)
+ 
+     fetch_ea_32(fetchdat);
+     if (cpu_mod != 3)
+-        SEG_CHECK_READ(cpu_state.ea_seg);
++        if ((rmdat & 0x30) == 0x10)     /* Tetrium lockstep: NOT / NEG read-modify-write: a write */
++            SEG_CHECK_WRITE(cpu_state.ea_seg);
++        else
++            SEG_CHECK_READ(cpu_state.ea_seg);
+     dst = geteab();
+     if (cpu_state.abrt)
+         return 1;
+@@ -301,7 +307,10 @@ opF7_w_a16(uint32_t fetchdat)
+ 
+     fetch_ea_16(fetchdat);
+     if (cpu_mod != 3)
+-        SEG_CHECK_READ(cpu_state.ea_seg);
++        if ((rmdat & 0x30) == 0x10)     /* Tetrium lockstep: NOT / NEG read-modify-write: a write */
++            SEG_CHECK_WRITE(cpu_state.ea_seg);
++        else
++            SEG_CHECK_READ(cpu_state.ea_seg);
+     dst = geteaw();
+     if (cpu_state.abrt)
+         return 1;
+@@ -415,7 +424,10 @@ opF7_w_a32(uint32_t fetchdat)
+ 
+     fetch_ea_32(fetchdat);
+     if (cpu_mod != 3)
+-        SEG_CHECK_READ(cpu_state.ea_seg);
++        if ((rmdat & 0x30) == 0x10)     /* Tetrium lockstep: NOT / NEG read-modify-write: a write */
++            SEG_CHECK_WRITE(cpu_state.ea_seg);
++        else
++            SEG_CHECK_READ(cpu_state.ea_seg);
+     dst = geteaw();
+     if (cpu_state.abrt)
+         return 1;
+@@ -528,7 +540,10 @@ opF7_l_a16(uint32_t fetchdat)
+ 
+     fetch_ea_16(fetchdat);
+     if (cpu_mod != 3)
+-        SEG_CHECK_READ(cpu_state.ea_seg);
++        if ((rmdat & 0x30) == 0x10)     /* Tetrium lockstep: NOT / NEG read-modify-write: a write */
++            SEG_CHECK_WRITE(cpu_state.ea_seg);
++        else
++            SEG_CHECK_READ(cpu_state.ea_seg);
+     dst = geteal();
+     if (cpu_state.abrt)
+         return 1;
+@@ -622,7 +637,10 @@ opF7_l_a32(uint32_t fetchdat)
+ 
+     fetch_ea_32(fetchdat);
+     if (cpu_mod != 3)
+-        SEG_CHECK_READ(cpu_state.ea_seg);
++        if ((rmdat & 0x30) == 0x10)     /* Tetrium lockstep: NOT / NEG read-modify-write: a write */
++            SEG_CHECK_WRITE(cpu_state.ea_seg);
++        else
++            SEG_CHECK_READ(cpu_state.ea_seg);
+     dst = geteal();
+     if (cpu_state.abrt)
+         return 1;
+@@ -816,9 +834,15 @@ opBOUND_w_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -583,7 +833,7 @@ index 639c2c029..e22e9a522 100644
      if (cpu_state.abrt)
          return 1;
  
-@@ -865,9 +871,15 @@ opBOUND_l_a16(uint32_t fetchdat)
+@@ -865,9 +889,15 @@ opBOUND_l_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -603,10 +853,70 @@ index 639c2c029..e22e9a522 100644
          return 1;
  
 diff --git a/src/cpu/x86_ops_mov.h b/src/cpu/x86_ops_mov.h
-index 787a727d3..4b85b9f94 100644
+index 787a727d3..09963cbfd 100644
 --- a/src/cpu/x86_ops_mov.h
 +++ b/src/cpu/x86_ops_mov.h
-@@ -521,6 +521,7 @@ opXLAT_a16(UNUSED(uint32_t fetchdat))
+@@ -223,7 +223,8 @@ opMOV_b_imm_a16(uint32_t fetchdat)
+     uint8_t temp;
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON((rmdat & 0x38) != 0);
+-    SEG_CHECK_WRITE(cpu_state.ea_seg);
++    if (cpu_mod != 3)       /* Tetrium lockstep: a register destination has no segment */
++        SEG_CHECK_WRITE(cpu_state.ea_seg);
+     temp = readmemb(cs, cpu_state.pc);
+     cpu_state.pc++;
+     if (cpu_state.abrt)
+@@ -239,7 +240,8 @@ opMOV_b_imm_a32(uint32_t fetchdat)
+     uint8_t temp;
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON((rmdat & 0x38) != 0);
+-    SEG_CHECK_WRITE(cpu_state.ea_seg);
++    if (cpu_mod != 3)       /* Tetrium lockstep: a register destination has no segment */
++        SEG_CHECK_WRITE(cpu_state.ea_seg);
+     temp = getbyte();
+     if (cpu_state.abrt)
+         return 1;
+@@ -255,7 +257,8 @@ opMOV_w_imm_a16(uint32_t fetchdat)
+     uint16_t temp;
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON((rmdat & 0x38) != 0);
+-    SEG_CHECK_WRITE(cpu_state.ea_seg);
++    if (cpu_mod != 3)       /* Tetrium lockstep: a register destination has no segment */
++        SEG_CHECK_WRITE(cpu_state.ea_seg);
+     temp = getword();
+     if (cpu_state.abrt)
+         return 1;
+@@ -270,7 +273,8 @@ opMOV_w_imm_a32(uint32_t fetchdat)
+     uint16_t temp;
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON((rmdat & 0x38) != 0);
+-    SEG_CHECK_WRITE(cpu_state.ea_seg);
++    if (cpu_mod != 3)       /* Tetrium lockstep: a register destination has no segment */
++        SEG_CHECK_WRITE(cpu_state.ea_seg);
+     temp = getword();
+     if (cpu_state.abrt)
+         return 1;
+@@ -285,7 +289,8 @@ opMOV_l_imm_a16(uint32_t fetchdat)
+     uint32_t temp;
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON((rmdat & 0x38) != 0);
+-    SEG_CHECK_WRITE(cpu_state.ea_seg);
++    if (cpu_mod != 3)       /* Tetrium lockstep: a register destination has no segment */
++        SEG_CHECK_WRITE(cpu_state.ea_seg);
+     temp = getlong();
+     if (cpu_state.abrt)
+         return 1;
+@@ -300,7 +305,8 @@ opMOV_l_imm_a32(uint32_t fetchdat)
+     uint32_t temp;
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON((rmdat & 0x38) != 0);
+-    SEG_CHECK_WRITE(cpu_state.ea_seg);
++    if (cpu_mod != 3)       /* Tetrium lockstep: a register destination has no segment */
++        SEG_CHECK_WRITE(cpu_state.ea_seg);
+     temp = getlong();
+     if (cpu_state.abrt)
+         return 1;
+@@ -521,6 +527,7 @@ opXLAT_a16(UNUSED(uint32_t fetchdat))
      uint8_t  temp;
  
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -614,7 +924,7 @@ index 787a727d3..4b85b9f94 100644
      temp = readmemb(cpu_state.ea_seg->base, addr);
      if (cpu_state.abrt)
          return 1;
-@@ -536,6 +537,7 @@ opXLAT_a32(UNUSED(uint32_t fetchdat))
+@@ -536,6 +543,7 @@ opXLAT_a32(UNUSED(uint32_t fetchdat))
      uint8_t  temp;
  
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -739,10 +1049,26 @@ index 2b221d79c..cd152949d 100644
          x86gpf(NULL, 0);
          return 1;
 diff --git a/src/cpu/x86_ops_pmode.h b/src/cpu/x86_ops_pmode.h
-index 29d45f562..20e3a0f41 100644
+index 29d45f562..a6daf8619 100644
 --- a/src/cpu/x86_ops_pmode.h
 +++ b/src/cpu/x86_ops_pmode.h
-@@ -531,7 +531,9 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+@@ -495,6 +495,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+             }
+             if (cpu_mod != 3)
+                 SEG_CHECK_READ(cpu_state.ea_seg);
++            CHECK_READ_EA(6); /* x86ref: the base is limit-checked too, before either part is read */
+             limit = geteaw();
+             base  = readmeml(0, easeg + cpu_state.eaaddr + 2);
+             if (cpu_state.abrt)
+@@ -514,6 +515,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+             }
+             if (cpu_mod != 3)
+                 SEG_CHECK_READ(cpu_state.ea_seg);
++            CHECK_READ_EA(6); /* x86ref: the base is limit-checked too, before either part is read */
+             limit = geteaw();
+             base  = readmeml(0, easeg + cpu_state.eaaddr + 2);
+             if (cpu_state.abrt)
+@@ -531,7 +533,9 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
                  SEG_CHECK_WRITE(cpu_state.ea_seg);
              if (is386 && is32 && (cpu_mod == 3)) {
                  if (is486 || isibm486)
@@ -753,7 +1079,7 @@ index 29d45f562..20e3a0f41 100644
                  else if (is386 && !cpu_16bitbus)
                      seteaw(cr0 | /* 0x7FFFFF00 */ 0x7FFFFFE0);
                  else
-@@ -583,6 +585,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+@@ -583,6 +587,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
                     elsewhere. */
                  flushmmucache_pc();
                  flushmmucache_nopc();
@@ -762,10 +1088,23 @@ index 29d45f562..20e3a0f41 100644
                  PREFETCH_RUN(12, 2, rmdat, 0, 0, 0, 0, ea32);
                  break;
 diff --git a/src/cpu/x86_ops_rep.h b/src/cpu/x86_ops_rep.h
-index 03808299d..969bd66c8 100644
+index 03808299d..e6bbf842d 100644
 --- a/src/cpu/x86_ops_rep.h
 +++ b/src/cpu/x86_ops_rep.h
-@@ -33,7 +33,7 @@
+@@ -5,10 +5,11 @@
+                                                                                                                   \
+         addr64 = 0x00000000;                                                                                      \
+                                                                                                                   \
++        /* Tetrium lockstep: the I/O permission before the count (a count of 0 faults too) */                     \
++        check_io_perm(DX, 1);                                                                                 \
+         if (CNT_REG > 0) {                                                                                        \
+             uint8_t temp;                                                                                         \
+                                                                                                                   \
+-            check_io_perm(DX, 1);                                                                                 \
+                                                                                                                   \
+             SEG_CHECK_WRITE(&cpu_state.seg_es);                                                                   \
+             CHECK_WRITE(&cpu_state.seg_es, DEST_REG, DEST_REG);                                                   \
+@@ -33,7 +34,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -774,7 +1113,20 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -72,7 +72,7 @@
+@@ -44,10 +45,11 @@
+                                                                                                                   \
+         addr64a[0] = addr64a[1] = 0x00000000;                                                                     \
+                                                                                                                   \
++        /* Tetrium lockstep: the I/O permission before the count (a count of 0 faults too) */                     \
++        check_io_perm(DX, 2);                                                                                 \
+         if (CNT_REG > 0) {                                                                                        \
+             uint16_t temp;                                                                                        \
+                                                                                                                   \
+-            check_io_perm(DX, 2);                                                                                 \
+                                                                                                                   \
+             SEG_CHECK_WRITE(&cpu_state.seg_es);                                                                   \
+             CHECK_WRITE(&cpu_state.seg_es, DEST_REG, DEST_REG + 1UL);                                             \
+@@ -72,7 +74,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -783,7 +1135,20 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -111,7 +111,7 @@
+@@ -83,10 +85,11 @@
+                                                                                                                   \
+         addr64a[0] = addr64a[1] = addr64a[2] = addr64a[3] = 0x00000000;                                           \
+                                                                                                                   \
++        /* Tetrium lockstep: the I/O permission before the count (a count of 0 faults too) */                     \
++        check_io_perm(DX, 4);                                                                                 \
+         if (CNT_REG > 0) {                                                                                        \
+             uint32_t temp;                                                                                        \
+                                                                                                                   \
+-            check_io_perm(DX, 4);                                                                                 \
+                                                                                                                   \
+             SEG_CHECK_WRITE(&cpu_state.seg_es);                                                                   \
+             CHECK_WRITE(&cpu_state.seg_es, DEST_REG, DEST_REG + 3UL);                                             \
+@@ -111,7 +114,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, writes, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -792,14 +1157,16 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -126,13 +126,13 @@
+@@ -123,6 +126,8 @@
+                                                                                                                   \
+         addr64 = 0x00000000;                                                                                      \
+                                                                                                                   \
++        /* Tetrium lockstep: the I/O permission before the count (a count of 0 faults too) */                     \
++        check_io_perm(DX, 1);                                                                                 \
          if (CNT_REG > 0) {                                                                                        \
              uint8_t temp;                                                                                         \
                                                                                                                    \
-+            check_io_perm(DX, 1);                                                                                 \
-             SEG_CHECK_READ(cpu_state.ea_seg);                                                                     \
-             CHECK_READ(cpu_state.ea_seg, SRC_REG, SRC_REG);                                                       \
-             high_page = 0;                                                                                        \
+@@ -132,7 +137,6 @@
              do_mmut_rb(cpu_state.ea_seg->base, SRC_REG, &addr64);                                                 \
              if (cpu_state.abrt)                                                                                   \
                  return 1;                                                                                         \
@@ -807,7 +1174,7 @@ index 03808299d..969bd66c8 100644
                                                                                                                    \
              temp = readmemb_n(cpu_state.ea_seg->base, SRC_REG, addr64);                                           \
              outb(DX, temp);                                                                                       \
-@@ -150,7 +150,7 @@
+@@ -150,7 +154,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -816,14 +1183,16 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -164,13 +164,13 @@
+@@ -161,6 +165,8 @@
+                                                                                                                   \
+         addr64a[0] = addr64a[1] = 0x00000000;                                                                     \
+                                                                                                                   \
++        /* Tetrium lockstep: the I/O permission before the count (a count of 0 faults too) */                     \
++        check_io_perm(DX, 2);                                                                                 \
          if (CNT_REG > 0) {                                                                                        \
              uint16_t temp;                                                                                        \
                                                                                                                    \
-+            check_io_perm(DX, 2);                                                                                 \
-             SEG_CHECK_READ(cpu_state.ea_seg);                                                                     \
-             CHECK_READ(cpu_state.ea_seg, SRC_REG, SRC_REG + 1UL);                                                 \
-             high_page = 0;                                                                                        \
+@@ -170,7 +176,6 @@
              do_mmut_rw(cpu_state.ea_seg->base, SRC_REG, addr64a);                                                 \
              if (cpu_state.abrt)                                                                                   \
                  return 1;                                                                                         \
@@ -831,7 +1200,7 @@ index 03808299d..969bd66c8 100644
                                                                                                                    \
              temp = readmemw_n(cpu_state.ea_seg->base, SRC_REG, addr64a);                                          \
              outw(DX, temp);                                                                                       \
-@@ -188,7 +188,7 @@
+@@ -188,7 +193,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -840,14 +1209,16 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -202,13 +202,13 @@
+@@ -199,6 +204,8 @@
+                                                                                                                   \
+         addr64a[0] = addr64a[1] = addr64a[2] = addr64a[3] = 0x00000000;                                           \
+                                                                                                                   \
++        /* Tetrium lockstep: the I/O permission before the count (a count of 0 faults too) */                     \
++        check_io_perm(DX, 4);                                                                                 \
          if (CNT_REG > 0) {                                                                                        \
              uint32_t temp;                                                                                        \
                                                                                                                    \
-+            check_io_perm(DX, 4);                                                                                 \
-             SEG_CHECK_READ(cpu_state.ea_seg);                                                                     \
-             CHECK_READ(cpu_state.ea_seg, SRC_REG, SRC_REG + 3UL);                                                 \
-             high_page = 0;                                                                                        \
+@@ -208,7 +215,6 @@
              do_mmut_rl(cpu_state.ea_seg->base, SRC_REG, addr64a);                                                 \
              if (cpu_state.abrt)                                                                                   \
                  return 1;                                                                                         \
@@ -855,7 +1226,7 @@ index 03808299d..969bd66c8 100644
                                                                                                                    \
              temp = readmeml_n(cpu_state.ea_seg->base, SRC_REG, addr64a);                                          \
              outl(DX, temp);                                                                                       \
-@@ -226,7 +226,7 @@
+@@ -226,7 +232,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, writes, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -864,7 +1235,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -271,13 +271,13 @@
+@@ -271,13 +277,13 @@
              reads++;                                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 3 : 4;                                                                        \
@@ -880,7 +1251,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -322,13 +322,13 @@
+@@ -322,13 +328,13 @@
              reads++;                                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 3 : 4;                                                                        \
@@ -896,7 +1267,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -373,13 +373,13 @@
+@@ -373,13 +379,13 @@
              reads++;                                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 3 : 4;                                                                        \
@@ -912,7 +1283,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -407,13 +407,13 @@
+@@ -407,13 +413,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 4 : 5;                                                                        \
@@ -928,7 +1299,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -440,13 +440,13 @@
+@@ -440,13 +446,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 4 : 5;                                                                        \
@@ -944,7 +1315,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -473,13 +473,13 @@
+@@ -473,13 +479,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 4 : 5;                                                                        \
@@ -960,7 +1331,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -508,13 +508,13 @@
+@@ -508,13 +514,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 4 : 5;                                                                        \
@@ -976,7 +1347,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -542,13 +542,13 @@
+@@ -542,13 +548,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 4 : 5;                                                                        \
@@ -992,7 +1363,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -576,13 +576,13 @@
+@@ -576,13 +582,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 4 : 5;                                                                        \
@@ -1008,7 +1379,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -634,7 +634,7 @@
+@@ -634,7 +640,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
          if ((CNT_REG > 0) && (FV == tempz)) {                                                                     \
              CPU_BLOCK_END();                                                                                      \
@@ -1017,7 +1388,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -685,7 +685,7 @@
+@@ -685,7 +691,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
          if ((CNT_REG > 0) && (FV == tempz)) {                                                                     \
              CPU_BLOCK_END();                                                                                      \
@@ -1026,7 +1397,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -736,7 +736,7 @@
+@@ -736,7 +742,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, 0, 0);                                                     \
          if ((CNT_REG > 0) && (FV == tempz)) {                                                                     \
              CPU_BLOCK_END();                                                                                      \
@@ -1035,7 +1406,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -766,13 +766,13 @@
+@@ -766,13 +772,13 @@
              cycles -= is486 ? 5 : 8;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 5 : 8;                                                                        \
@@ -1051,7 +1422,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -801,13 +801,13 @@
+@@ -801,13 +807,13 @@
              cycles -= is486 ? 5 : 8;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 5 : 8;                                                                        \
@@ -1067,7 +1438,7 @@ index 03808299d..969bd66c8 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -836,13 +836,13 @@
+@@ -836,13 +842,13 @@
              cycles -= is486 ? 5 : 8;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 5 : 8;                                                                        \

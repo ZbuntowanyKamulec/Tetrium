@@ -156,7 +156,9 @@ make sim            # Verilator testbench (Verilator 5)
 make test           # SingleStepTests/80386, real mode
 tests/test386.sh    # test386.asm in lockstep
 tests/pm.sh         # protected-mode and paging directed tests
-tests/rlock.sh      # random programs in lockstep (PM=1: protected mode, PG=1: paging)
+tests/rlock.sh      # random programs in lockstep (PM=1: protected mode, PG=1: paging, D32=1: 32-bit code,
+                    #   R3=1 / RING=1, 2: ring 3 / 1, 2, V86=1: virtual-8086 mode, IRQ=1: with interrupts,
+                    #   NMI=1: with NMIs)
 tests/lock.sh       # benchmarks and directed tests in lockstep
 tests/clocks.py     # cycles per instruction form, against the i486
 tests/perf.sh       # Dhrystone and CoreMark

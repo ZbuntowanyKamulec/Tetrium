@@ -6,9 +6,10 @@
 //  * instruction length from the per-byte predecode stored in the I-cache
 //    (tetrium_pdec.svh: mode independent; the operand / address size selects),
 //    everything else in the BRAM microcode ROM indexed by page / opcode
-//    (+mod3, +reg for group opcodes)
+//    (+mod3, +reg for group opcodes; protected mode and I/O with the permission check
+//    have sequences of their own: pm_ent / io_ent)
 //  * the instruction pointer is not tracked here: every block carries its IP,
-//    so the IP of the current byte is {block_ip[15:3], offset}
+//    so the IP of the current byte is {block_ip[31:3], offset}
 //  * prefixes (segment, 66, 67, LOCK, REP) and the 0F escape are consumed one
 //    per cycle; a prefix / escape right after an instruction is consumed together
 //    with it (skip: caught with the instruction in front, its state kept in sk_*);
