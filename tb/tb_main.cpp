@@ -46,7 +46,7 @@ static std::vector<std::pair<uint16_t, uint8_t>> io_log;
 // OUT data, byte by byte in order (port, value): the DUT's I/O write cycles and the model's OUTs,
 // compared as they come (the DUT's write may be on the bus after its instruction retired)
 static std::deque<std::pair<uint16_t, uint8_t>> dut_o, ref_o;
-// Wishbone data width of the build (make CORE=486 sim BW=64 passes -DBUS_DW to both)
+// Wishbone data width of the build (make sim BW=64 passes -DBUS_DW to both)
 #ifndef CPU_SIG                                  // processor configuration (tetrium_cfg.svh)
 #define CPU_SIG 0x422
 #endif

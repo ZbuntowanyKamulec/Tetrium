@@ -100,7 +100,7 @@ the first column point to the notes below.
 | FPGA | Tool | fmax | Logic | RAM | DSP |
 |---|---|---|---|---|---|
 | Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 96.1–96.2 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 34 BRAM36 | 4 |
-| Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 83.5–85.9 MHz | 20.6k ALMs, 13.7k registers | 139 M10K, 90 kbit MLAB | 3 |
+| Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 82.5–85.7 MHz | 20.4k ALMs, 13.5k registers | 139 M10K, 90 kbit MLAB | 3 |
 
 The CPU alone (I/O as virtual pins), maximum-performance settings, three runs each
 (Quartus seeds, Vivado placer directives).
@@ -140,8 +140,7 @@ On a MiSTer (ao486-based core, CPU at 69.23 MHz):
 - `halted`, `shutdown` (triple fault)
 
 Parameters set the bus width, cacheable and write-combining regions, the reset CS base and
-`CR0`, the CPU signature, `CPUID` and the debug registers. Cache and TLB sizes are in
-`rtl/tetrium_cfg.svh`.
+`CR0`, the CPU signature and `CPUID`. Cache and TLB sizes are in `rtl/tetrium_cfg.svh`.
 
 ## Verification
 
@@ -152,7 +151,7 @@ from a real 486 (`tb/x86ref/86box-486.patch`).
 ```sh
 tests/fetch.sh      # 86Box, test386.asm and SingleStepTests/80386 into ref/
 tests/conv386.sh    # convert the SingleStepTests
-tests/run.sh        # build and run the test suites, one result line each (quick / full / chosen suites; -l lists them)
+tests/run.sh        # the test suites in one run: quick (default), full or chosen ones; -l lists them
 make sim            # Verilator testbench (Verilator 5)
 make test           # SingleStepTests/80386, real mode
 tests/test386.sh    # test386.asm in lockstep
