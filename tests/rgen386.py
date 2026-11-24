@@ -28,7 +28,8 @@ pages and not-present code pages; a #PF handler at FE00 sets P and W in the PTE,
 INVLPGs and restarts.  MOV CR3 only reloads it, MOV CR0 keeps PE / PG / WP.
 
 --pm: the same programs in 16-bit protected mode ('RPM3' file): the testbench builds a
-GDT whose selectors equal the real-mode segment values (same bases, 64 KB limits) plus
+GDT whose selectors equal the real-mode segment values (same bases, 64 KB limits; for 7
+seeds in 8 the code segment's base is 1FFF8h + 1..7, not a multiple of 8, a copy of the program) plus
 test descriptors (TSTSEL), and an IDT of 16-bit interrupt gates to the IVT handlers;
 a prologue at FF00 sets PE and jumps to the program.  Segment loads also use the test
 selectors (faults are resumed as usual), system items keep PE and the tables.

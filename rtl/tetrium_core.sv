@@ -131,7 +131,7 @@ module tetrium_core #(
   logic [31:0] c_disp, c_imm;
   logic [31:0] c_ip_start, c_ptgt;
   logic [31:0] c_ip_nx;
-  logic [31:3] q_ip;
+  logic [31:0] q_ip;
   logic d_qempty;
   logic c_pt, c_inj;
   logic [5:0] c_srdm;

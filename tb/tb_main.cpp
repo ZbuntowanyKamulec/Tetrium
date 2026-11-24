@@ -572,14 +572,15 @@ static void put_desc(uint32_t a, uint32_t base, uint32_t lim, uint8_t acc, uint8
 // (code, stack and data DPL the ring, a 386 TSS
 // 68 with SS0:ESP0 = 60:FFFE and an I/O permission bitmap for ports 0-3FF, IDT gates DPL 3 but a
 // quarter DPL 0).  Either way the handlers (16-bit code at the same base) are reached through
-// selector 38
+// selector 38.  The code segment's base is cbase: 10000h, or 1FFF8h + k (k = 1..7, from the seed: a
+// second copy of the program there) so that code segments whose base is not a multiple of 8 are tested
 // v86 ('RPMV' / 'RPGV', --v86): real-mode programs in V86 mode, the TSS as for r3, 32-bit gates
-static void rpm_tables(const uint16_t *ivt, uint16_t cs, bool d32, int ring, bool v86, uint32_t seed) {
+static void rpm_tables(const uint16_t *ivt, uint16_t cs, uint32_t cbase, bool d32, int ring, bool v86, uint32_t seed) {
     const uint32_t G = 0x80000, I = 0x8C000, T = 0x8F000;
     const bool r3 = ring > 0;                                       // (an outer ring)
     const uint8_t dpl = ring << 5;
     memset(mem + G, 0, 0xB008);
-    put_desc(G + cs, cs << 4, 0xFFFF, 0x9B | dpl, d32 ? 4 : 0);
+    put_desc(G + cs, cbase, 0xFFFF, 0x9B | dpl, d32 ? 4 : 0);
     for (uint16_t sg : {0x3000, 0x4000, 0x5000, 0x7000, 0xB000}) put_desc(G + sg, sg << 4, 0xFFFF, 0x93 | dpl, 0);
     uint32_t x = seed * 2246822519u + 3266489917u;
     auto rnd = [&](uint32_t n) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return x % n; };
@@ -598,7 +599,7 @@ static void rpm_tables(const uint16_t *ivt, uint16_t cs, bool d32, int ring, boo
     put_desc(G + 0x20, 0x40000, 0xFFFF, 0xF3, 0);         // DPL 3
     put_desc(G + 0x28, 0x10000, 0xFFFF, 0x99, 0);         // execute-only code
     put_desc(G + 0x30, 0x50000, 0x1FFFF, 0x93, 4);        // 128 KB, B
-    put_desc(G + 0x38, 0x10000, 0xFFFF, 0x9B, 0);         // readable code
+    put_desc(G + 0x38, cbase, 0xFFFF, 0x9B, 0);           // readable code (the handlers)
     put_desc(G + 0x40, 0x30000, 0x00FF, 0x82, 0);         // LDT (system)
     put_desc(G + 0x48, 0x30000, 0xFFFF, 0x93, 0);         // (RPL 3 selector 4B: #GP)
     for (int v = 0; v < 256; v++) {
@@ -614,7 +615,7 @@ static void rpm_tables(const uint16_t *ivt, uint16_t cs, bool d32, int ring, boo
 // present / read-only / aliased (another data frame) / PCD / supervisor-only, code pages
 // not present / supervisor-only (the program's #PF handler sets P, W and U); selectors 50
 // (flat) and 58 (the table)
-static void rpg_tables(uint32_t seed) {
+static void rpg_tables(uint32_t seed, uint32_t cbase) {
     const uint32_t G = 0x80000, PD = 0x8D000, PT = 0x8E000;
     put_desc(G + 0x50, 0, 0xFFFFF, 0x93, 0xC);
     put_desc(G + 0x58, PT, 0xFFF, 0x93, 0);
@@ -632,7 +633,7 @@ static void rpg_tables(uint32_t seed) {
             if (rnd(4) == 0) e &= ~2u;                                       // read-only
             if (rnd(6) == 0) e |= 0x10;                                      // PCD
             if (rnd(7) == 0) e &= ~4u;                                       // supervisor only
-        } else if (p >= 0x10 && p < 0x1F) {
+        } else if ((p >= 0x10 && p < 0x1F) || (cbase != 0x10000 && p >= 0x20 && p < 0x2E)) {   // (not the handlers' page)
             if (rnd(3) == 0) e &= ~1u;                                       // code, not present
             if (rnd(7) == 0) e &= ~4u;                                       // ... supervisor only
         }
@@ -716,8 +717,12 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 mem[t + v * 4] = ivt[v] & 0xFF; mem[t + v * 4 + 1] = ivt[v] >> 8;
                 mem[t + v * 4 + 2] = sg0[1] & 0xFF; mem[t + v * 4 + 3] = sg0[1] >> 8;
             }
-        if (rpm) rpm_tables(ivt, sg0[1], rd32, rring, rv86, seed);
-        if (rpg) rpg_tables(seed);
+        // protected mode: the code segment's base 1FFF8h + k for k = 1..7 (from the seed), a second
+        // copy of the program (the real-mode prologue runs from the first, at 10000h)
+        const uint32_t ck = (rpm && !rv86) ? (seed >> 4) & 7 : 0, cbase = ck ? 0x1FFF8 + ck : 0x10000;
+        if (ck) memcpy(mem + cbase, img, sizeof(img));
+        if (rpm) rpm_tables(ivt, sg0[1], cbase, rd32, rring, rv86, seed);
+        if (rpg) rpg_tables(seed, cbase);
     } else if (lock_rom) memcpy(mem + MEM1M - rn, romb, rn);
     else memcpy(mem + 0x10000, img, n);
     io_log.clear(); io_rec = lock_rom; dut_o.clear(); ref_o.clear();

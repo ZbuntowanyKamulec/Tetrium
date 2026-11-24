@@ -8,8 +8,9 @@
 //    everything else in the BRAM microcode ROM indexed by page / opcode
 //    (+mod3, +reg for group opcodes; protected mode and I/O with the permission check
 //    have sequences of their own: pm_ent / io_ent)
-//  * the instruction pointer is not tracked here: every block carries its IP,
-//    so the IP of the current byte is {block_ip[31:3], offset}
+//  * the instruction pointer is not tracked here: every block carries the IP of its
+//    first byte, so the IP of the current byte is block_ip + offset (the code segment
+//    base need not be a multiple of 8)
 //  * prefixes (segment, 66, 67, LOCK, REP) and the 0F escape are consumed one
 //    per cycle; a prefix / escape right after an instruction is consumed together
 //    with it (skip: caught with the instruction in front, its state kept in sk_*);
@@ -40,7 +41,7 @@ module tetrium_decode (
     input  logic        q_pt,
     input  logic [31:0] q_ptgt,
     input  logic [31:3] q_lin,
-    input  logic [31:3] q_ip,
+    input  logic [31:0] q_ip,
     input  logic [3:0]  q_bid,
     output logic        q_full,
     // front-end flush (registered by the core)
@@ -116,7 +117,7 @@ module tetrium_decode (
   logic        qpt  [4];
   logic [31:0] qptg [4];
   logic [31:3] qlin [4];
-  logic [31:3] qip  [4];
+  logic [31:0] qip  [4];
   logic [3:0]  qbid [4];     // branch predictor snapshot id of the block
   logic [8*PDW-1:0] qpd [4]; // per-byte predecode
   logic [2:0]  cnt;
@@ -140,7 +141,7 @@ module tetrium_decode (
   wire  [2:0]  cb_e  = cb ? qe[1]  : qe[0];
   wire         cb_pt = cb ? qpt[1] : qpt[0];
   wire  [2:0]  nb_s  = cb ? qs[2]  : qs[1];
-  wire  [31:0] cur_ip = cb ? {qip[1], off} : {qip[0], off};
+  wire  [31:0] cur_ip = (cb ? qip[1] : qip[0]) + {29'd0, off};
 
   // length select form (see lsel): the shift tree on Cyclone V, or with DEC_LTREE (sim)
 `ifdef ALTERA
@@ -281,7 +282,7 @@ module tetrium_decode (
   logic [2:0]  i_s;
   logic [1:0]  i_rep;
   logic [31:0] ir_ipstart, ir_ptgt;
-  logic [31:3] ir_cbip3;
+  logic [31:0] ir_cbip;
   logic [4:0]  ir_iend;
   logic        ir_pt;
   logic [3:0]  ir_bid;
@@ -560,8 +561,8 @@ module tetrium_decode (
   end
 `endif
   // next IP = block IP + iend (D2, from IR)
-  wire [31:3] cb_ip3 = cb ? qip[1] : qip[0];
-  wire [31:3] nx_ip3 = ir_cbip3 + {27'd0, ir_iend[4:3]};
+  wire [31:0] cb_ip = cb ? qip[1] : qip[0];
+  wire [31:0] nx_ip = ir_cbip + {27'd0, ir_iend};
   // a prefix / escape byte is always 1 byte long
   wire       pfx_ok    = hv && k_en[1] && !k_bad[1] && !bpfx;
 
@@ -694,7 +695,7 @@ module tetrium_decode (
     end
   // IP of the prefixes: a prefix skipped behind the instruction caught last cycle
   // starts where that instruction (still in IR) ends
-  wire [31:0] pfx_ip_e = (skq && !(pr_any && !iss_q)) ? {nx_ip3, ir_iend[2:0]} : pfx_ip;
+  wire [31:0] pfx_ip_e = (skq && !(pr_any && !iss_q)) ? nx_ip : pfx_ip;
   always_ff @(posedge clk) begin
     if (rst) begin
       eoff <= '0; wait_s <= 1'b0; skip <= 1'b0;
@@ -812,7 +813,7 @@ module tetrium_decode (
             c_imm      <= imm;
             ucnt       <= wb[3][4:0];              // ENTER nesting level
             c_ip_start <= ir_ipstart;
-            c_ip_nx    <= {nx_ip3, ir_iend[2:0]};
+            c_ip_nx    <= nx_ip;
             c_sovr_v   <= i_sv;
             c_sovr     <= i_s;
             c_rep      <= i_rep;
@@ -872,7 +873,7 @@ module tetrium_decode (
       i_rep      <= pfx_rep;
       i_lock     <= pfx_lock;
       ir_ipstart <= pfx_any ? pfx_ip_e : cur_ip;
-      ir_cbip3   <= cb_ip3;
+      ir_cbip    <= cb_ip;
       ir_iend    <= iend;
       ir_pt      <= pt_end;
       ir_ptgt    <= qptg[{1'b0, cb} + ptblk];

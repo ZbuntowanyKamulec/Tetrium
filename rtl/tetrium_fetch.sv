@@ -49,7 +49,7 @@ module tetrium_fetch #(
     output logic        q_pt,
     output logic [31:0] q_ptgt,
     output logic [31:3] q_lin,
-    output logic [31:3] q_ip,
+    output logic [31:0] q_ip,          // IP of the block's first byte
     output logic [3:0]  q_bid,         // predictor snapshot id of the block
     // BTB training
     input  logic [3:0]  btb_bid,
@@ -120,7 +120,8 @@ module tetrium_fetch #(
   st_t st;
   logic        f_valid;     // fetching
   logic [31:0] f_lin;       // current fetch address (byte granular start)
-  logic [31:0] f_ip;
+  logic [31:0] f_bip;       // IP of the block's first byte (linear {f_lin[31:3], 000}; any
+                            // value: the code segment base need not be a multiple of 8)
   logic [31:0] f_cs;               // code segment base
   logic        f_nopred;
   logic        dv;          // BRAM output corresponds to f_lin
@@ -522,7 +523,7 @@ module tetrium_fetch #(
 `ifdef BPDBG
   always_ff @(posedge clk) begin
     if (q_push) $display("F push lin=%05x ip=%04x hit=%b pt=%0d end=%0d kind=%0d tgt=%04x bid=%0d ctr=%h",
-                         f_lin, f_ip, w_hit, pred_taken, be_end, be_kind, tgt_ip, bwp, gctr);
+                         f_lin, f_bip, w_hit, pred_taken, be_end, be_kind, tgt_ip, bwp, gctr);
     if (redir_v) $display("F redir csb:ip=%08x:%08x src=%0d br=%0d tk=%0d nopred=%0d", redir_csb, redir_ip, redir_src, redir_br, redir_tk, redir_nopred);
     if (t_we) $display("F train lin=%05x tk=%0d inval=%0d kind=%0d tgt=%04x way=%b", t_lin, t_taken, t_inval, t_kind, t_tgt, t_way);
   end
@@ -579,7 +580,7 @@ module tetrium_fetch #(
   logic [31:0] tk_ip;
   assign      q_push = run && hit && !q_full && !tk;
   // (no wrap at 64 KB: bytes beyond the code segment limit fault in A)
-  wire [31:0] blk_ip = {f_ip[31:3], 3'b000};
+  wire [31:0] blk_ip = f_bip;
   wire [31:0] seq_lin = a20({f_lin[31:3], 3'b000} + 32'd8);
   wire [31:0] seq_ip  = blk_ip + 32'd8;
   // target / return address of each way computed before the way select
@@ -591,8 +592,8 @@ module tetrium_fetch #(
   wire  [31:0] ras_lin  = a20(f_cs + ras_top);
   wire         p_ret    = pred_taken && (be_kind == 2'd2);
   wire         p_call   = pred_taken && (be_kind == 2'd1);
-  (* keep = "true" *) wire [31:0] cret0 = {f_ip[31:3], w_end[0]} + 32'd1;  // IP after the predicted CALL
-  (* keep = "true" *) wire [31:0] cret1 = {f_ip[31:3], w_end[1]} + 32'd1;
+  (* keep = "true" *) wire [31:0] cret0 = blk_ip + {28'd0, {1'b0, w_end[0]} + 4'd1};  // IP after the predicted CALL
+  (* keep = "true" *) wire [31:0] cret1 = blk_ip + {28'd0, {1'b0, w_end[1]} + 4'd1};
   wire  [31:0] call_ret = sel1 ? cret1 : cret0;
   // per-way final target (RAS for a return), then the way select
   wire  [31:0] wtl0 = (bw[0][BW-1 -: 2] == 2'd2) ? ras_lin : wtgt_lin0;
@@ -683,7 +684,7 @@ module tetrium_fetch #(
   assign q_pt   = pred_taken;
   assign q_ptgt = tc_use ? tcr[31:0] : tgt_ip;
   assign q_lin  = f_lin[31:3];
-  assign q_ip   = f_ip[31:3];
+  assign q_ip   = f_bip;
 
   // ---------------------------------------------------------------- uncacheable code (PCD)
   // A line filled from a page with PCD set is used once: it becomes valid as any fill,
@@ -937,7 +938,7 @@ module tetrium_fetch #(
       init_cnt <= '0;
       f_valid  <= 1'b0;
       f_lin    <= '0;
-      f_ip     <= '0;
+      f_bip    <= '0;
       f_cs     <= '0;
       f_nopred <= 1'b0;
       dv       <= 1'b0;
@@ -977,17 +978,17 @@ module tetrium_fetch #(
       end
       if (redir_v) begin
         f_valid  <= 1'b1;
-        f_ip     <= redir_ip;
+        f_bip    <= redir_ip - {29'd0, redir_lin[2:0]};
         f_cs     <= redir_csb;
         f_nopred <= redir_nopred;
       end else if (stop) begin
         f_valid  <= 1'b0;
       end else if (tk) begin
-        f_ip     <= tk_ip;
+        f_bip    <= tk_ip - {29'd0, tk_lin[2:0]};
         if (tk_far && tk_fcs) f_cs <= {12'h0, tk_ip[31:16], 4'h0};
       end else if (q_push) begin
         f_nopred <= 1'b0;
-        f_ip     <= seq_ip;
+        f_bip    <= seq_ip;
       end
       case (st)
         S_INIT: begin
