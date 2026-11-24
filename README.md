@@ -152,6 +152,7 @@ from a real 486 (`tb/x86ref/86box-486.patch`).
 ```sh
 tests/fetch.sh      # 86Box, test386.asm and SingleStepTests/80386 into ref/
 tests/conv386.sh    # convert the SingleStepTests
+tests/run.sh        # build and run the test suites, one result line each (quick / full / chosen suites; -l lists them)
 make sim            # Verilator testbench (Verilator 5)
 make test           # SingleStepTests/80386, real mode
 tests/test386.sh    # test386.asm in lockstep
@@ -161,6 +162,7 @@ tests/rlock.sh      # random programs in lockstep (PM=1: protected mode, PG=1: p
                     #   NMI=1: with NMIs)
 tests/lock.sh       # benchmarks and directed tests in lockstep
 tests/clocks.py     # cycles per instruction form, against the i486
+tests/probe.sh      # 486 behaviour probes: the core against a Bochs 486 PC (bootable floppies)
 tests/perf.sh       # Dhrystone and CoreMark
 ```
 

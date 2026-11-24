@@ -34,7 +34,20 @@
 start:
     cli
     mov  dword ptr [logp], offset log
-    # ---- CPUID
+    # ---- CPUID (if EFLAGS.ID can be toggled: a build without CPUID skips it)
+    pushfd
+    pop  eax
+    mov  ecx, eax
+    xor  eax, 0x200000
+    push eax
+    popfd
+    pushfd
+    pop  eax
+    push ecx
+    popfd
+    xor  eax, ecx
+    test eax, 0x200000
+    jz   nocpuid
     xor  eax, eax
     cpuid
     logr eax
@@ -52,6 +65,7 @@ start:
     cpuid
     logr eax
     logr ebx
+nocpuid:
     # ---- BSWAP, ESP included (swapped twice: the stack is not used in between)
     mov  eax, 0x11223344
     bswap eax
@@ -281,7 +295,6 @@ resume: .long 0
 logp:   .long 0
 mis:    .long 0x44332211, 0x88776655, 0xCCBBAA99, 0x00FFEEDD
         .long 0, 0, 0, 0
-log:    .fill 64, 4, 0
 gdtr:   .word 0x4F
         .long 0x10A00
 idtr:   .word 0x33 * 8 - 1
@@ -309,3 +322,4 @@ gdt:
     desc 0, 0xFFFFF, 0x9A, 0xC              # 30 flat code32
     desc 0x10700, 0x67, 0x89, 0             # 38 TSS32
     desc 0x10000, 0xFF, 0xF2, 4             # 40 data32 DPL 3, limit FF
+log:    .fill 64, 4, 0                  # (after the tables: room for the code)

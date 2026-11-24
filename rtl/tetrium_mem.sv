@@ -114,7 +114,7 @@ module tetrium_mem #(
     output logic        m_ldwait,
     output logic [15:0] m_fwd         // per load byte {valid, entry, lane[1:0]} of the store in E
 );
-  genvar w, b, k;
+  genvar w, b;
 `include "tetrium_mtype.svh"
   wire mrd = m_uw[UW_MRD_L] && !m_noacc;
 
@@ -125,7 +125,6 @@ module tetrium_mem #(
   localparam int ROWB  = WAYB - 3;                    // 8-byte rows per way
   localparam int SETB  = WAYB - LB;
   localparam int TAGB  = 32 - WAYB;
-  localparam int BEATB = LB - 2;                      // 32-bit beats per line (log2)
   localparam int TE    = TAGB + 1;                    // tag entry {valid, tag}
   // virtually indexed, physically tagged: the index must lie within the 4 KB page
   initial assert (WAYB <= 12) else $error("D-cache way larger than 4 KB (DC_KB / DC_WAYS)");

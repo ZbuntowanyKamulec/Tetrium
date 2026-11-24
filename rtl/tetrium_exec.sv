@@ -4,18 +4,18 @@
 //  * architectural register file, segment registers, flags, temporaries
 //  * operands are selected during M from the register file and registered;
 //    a registered bypass (last E writes) covers the M->E read-after-write
-//  * ALU (1 cycle) at operand size 8 / 16 / 32, shifter (1 cycle by one, 3 by
-//    CL / imm8), multiplier (4 cycles), divider (radix 2), BCD (2)
+//  * ALU (1 cycle) at operand size 8 / 16 / 32, shifter (1 cycle by one and a 32-bit
+//    register by imm8 prepared in M, else 2 by CL / imm8), multiplier (4 cycles),
+//    divider (radix 2), BCD (2)
 //  * resolves conditional and indirect branches, far transfers
 //  * raises interrupts / exceptions by asking decode to inject the INT
 //    microcode sequence; I/O and INTA bus cycles are performed here.  A fault
-//    (#UD, #DE) leaves no register / flag / memory change and restarts at the
-//    instruction's first byte.
+//    leaves no register / flag / memory change and restarts at the instruction's
+//    first byte.
 import tetrium_pkg::*;
 module tetrium_exec #(
     parameter bit          HAS_CPUID = 1'b1,   // CPUID (else #UD) and a writable EFLAGS.ID
-    parameter logic [31:0] CPU_SIG   = 32'h0000_0422,
-    parameter bit          DEBUG_REGS = 1'b1   // DR0-3 / DR7 breakpoints, DR7.GD, DR6 status (else storage only)
+    parameter logic [31:0] CPU_SIG   = 32'h0000_0422
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -76,8 +76,9 @@ module tetrium_exec #(
     input  logic [31:2] m_lin4,
     input  logic [31:0] m_slin,
     input  logic [31:2] m_slin4,
-    // paging: physical pages of the primary / secondary access from the last-page
-    // registers (A2) and whether M found them usable (hit, rights, D for a write)
+    // paging: physical pages of the primary / secondary access from the data micro-TLB
+    // (A2; a miss replayed in M through the TLB) and whether M found them usable (hit,
+    // rights, D for a write)
     input  logic [31:12] m_pppn,
     input  logic        m_pok,
     input  logic        m_ppcd,
@@ -85,7 +86,7 @@ module tetrium_exec #(
     input  logic        m_sok,
     input  logic [1:0]  m_ucpl,         // CPL the rights were checked with
     output logic        e_st_xp,        // the store in E is not translated yet (a load in M waits)
-    // MMU: TLB management, test registers, walker (data), last-page register loads
+    // MMU: TLB management, test registers, walker (data), micro-TLB loads
     output logic        mm_flush,       // CR3 written
     output logic        mm_invlpg,
     output logic [31:12] mm_inva,
@@ -105,7 +106,7 @@ module tetrium_exec #(
     input  logic        w_ok,
     input  logic [2:0]  w_err,
     input  logic [41:0] w_e,
-    output logic        e_lpp_ld,       // load the primary / secondary last-page register (walk result)
+    output logic        e_lpp_ld,       // load the micro-TLB with a walk result (primary / secondary access)
     output logic        e_lps_ld,
     output logic        x_pcd,          // the late load's page is uncacheable (PCD)
     output logic        lk_hold,        // locked read-modify-write: bus locked (read .. store drained)
@@ -138,14 +139,13 @@ module tetrium_exec #(
     input  logic        c_busy,         // a cache sweep is pending or running
     input  logic        smc_hit,        // a store hit a valid I-cache line
     input  logic        snp_hit,        // an external snoop hit a valid I-cache line
-    input  logic        smc_busy,       // its I-cache invalidations are still pending
     output logic        e_busy_valid,   // E holds a valid uop
     output logic [15:0] e_dmask,
-    // A1 bypasses: GPR destinations of the uop in E, and the data of a plain load
-    // in E once it is final (A1 may use it while the load is still in E)
     output logic        ce_push,      // committed near CALL (return address ce_rip) / RET
     output logic        ce_pop,
     output logic [31:0] ce_rip,
+    // A1 bypasses: GPR destinations of the uop in E, and the data of a plain load
+    // in E once it is final (A1 may use it while the load is still in E)
     output logic [7:0]  e_dm_e,
     output logic [7:0]  e_byp_m,        // plain load in E: its GPR (selects only; e_byp_ok: final)
     output logic        e_byp_ok,
@@ -180,7 +180,6 @@ module tetrium_exec #(
     output logic [31:0] e_ip,
     // mode (changes only through serializing instructions)
     output logic        e_pm,           // protected mode: CR0.PE and not V86
-    output logic        e_vm,
     output logic [1:0]  e_cpl,
     output logic        e_csd,          // CS.D: default operand / address size 32
     output logic        e_iochk,        // I/O instructions check the permission bitmap
@@ -226,7 +225,6 @@ module tetrium_exec #(
     output logic [31:0] rd_csb,         // code segment base
     output logic [31:0] rd_ip,
     output logic        rd_inject,
-    output logic [7:0]  rd_vec,
     // injected sequence: entry id, immediate (vector), restart / next IP, operand size,
     // opcode, delivery (not an instruction micro-jump)
     output logic [4:0]  rd_injid,
@@ -238,9 +236,6 @@ module tetrium_exec #(
     output logic        rd_int,
     output logic        rd_ecvx,        // the delivery pushes an error code (for the injected uops)
     output logic [4:0]  rd_cnt,         // micro-loop count (call gate parameters)
-    output logic        rd_ecv,         // the exception pushes an error code (protected mode)
-    output logic [15:0] rd_errc,
-    output logic [31:0] rd_ret,
     output logic        rd_stop,        // stop fetch (HLT / inject)
     // BTB training
     output logic        be_we,
@@ -250,7 +245,6 @@ module tetrium_exec #(
     output logic [1:0]  be_kind,
     output logic        be_ind,         // indirect near JMP / CALL (fetch target cache)
     output logic        be_tcw,         //   ... mispredicted (write the target cache)
-    output logic        be_pt,
     output logic        be_inval,
     output logic [3:0]  be_bid,         // predictor snapshot id (training and redirects)
     output logic        rd_br,          // redirect from a trained branch, actual direction rd_tk
@@ -285,7 +279,7 @@ module tetrium_exec #(
   // ================================================================ architectural state
   logic [31:0] g [8];
   logic [15:0] s [6];
-  logic [31:0] t0, t1, t2, t3, t4;
+  logic [31:0] t0, t1, t2, t3;
   logic [31:0] tx [6];         // T4..T9 (operand pre-select only; a distributed RAM costs more)
   logic [5:0]  tx_we;
   logic        ss_b;           // SS.B (E copy: stack size of LDSP / OLDSP)
@@ -348,7 +342,6 @@ module tetrium_exec #(
   assign e_flags = {10'h0, idf, 2'b0, ac, vm, rf, fimg};
   assign e_ip = ip_arch;
   assign e_pm  = cr0[0] && !vm;
-  assign e_vm  = vm;
   assign e_cpl = cpl;
   assign e_csd = cs_d;
   assign e_cr0 = cr0 | 32'h10;
@@ -358,7 +351,7 @@ module tetrium_exec #(
   logic        v;
   logic [6:0]  eop;
   logic [1:0]  wrk;
-  logic        last, bnd, w, pt, inj, spw, siw, diw, cxw, cxnz, ataken, repz, tgteq, ldwait, aex, p_aex, pg, as32;
+  logic        last, bnd, pt, inj, spw, siw, diw, cxw, cxnz, ataken, repz, tgteq, ldwait, aex, pg, as32;
   logic [7:0]  op, modrm;
   logic [31:0] ip_start, ip_next, ptgt, tgt;
   logic        tbad;
@@ -377,8 +370,7 @@ module tetrium_exec #(
   logic [31:2] st_lin4, ld_lin4;
   // physical pages: first byte / next word of the load and of the store
   logic [31:12] ld_ppn0, ld_ppn1, st_ppn0, st_ppn1;
-  logic        ld_pcd, pok_q, sok_q, sv_q, mrd_q;
-  logic [1:0]  ucpl;           // CPL when M checked the last-page rights
+  logic        ld_pcd, sv_q, mrd_q;
   logic        lcross_q, scross_q;   // the load / store crosses into the next page
   logic [15:0] dmask;
   logic [2:0]  xc;             // exception found before E
@@ -425,11 +417,10 @@ module tetrium_exec #(
   // static destination descriptors
   logic        p0_en, p1_en, p0_hi, p1_hi, sw_en, wr_en;
   logic [3:0]  tw_we, tw_r2;   // T0..T3 written by the uop in E (from R / from R2)
-  logic        t4_we;          // T4 (from R; never read by the next uop)
   logic [2:0]  p0_r, p1_r;
   logic [2:0]  p0_be, p1_be;  // lanes written: [0] [7:0], [1] [15:8], [2] [31:16]
   logic [2:0]  sw_r;
-  logic        p0_sp, p1_sp;  // special value (not R / R2)
+  logic        p1_sp;         // special value (not R2)
   logic [23:0] wh0, wh1;      // one-hot write enables: [3*reg+lane]
   // predecoded ALU control
   logic        c_asub, c_acf, c_logic;
@@ -586,7 +577,7 @@ module tetrium_exec #(
   function automatic logic isgpr(input logic [4:0] d);
     return (d == D_REG) || (d == D_RM) || (d == D_ACC) || (d == D_OPR) || (d == D_FIX);
   endfunction
-  logic       n_p0_en, n_p1_en, n_p0_hi, n_p1_hi, n_p0_sp, n_p1_sp, n_sw_en;
+  logic       n_p0_en, n_p1_en, n_p0_hi, n_p1_hi, n_p1_sp, n_sw_en;
   logic [2:0] n_p0_r, n_p1_r;
   logic [2:0] n_p0_be, n_p1_be;
   logic [2:0] n_sw_r;
@@ -600,7 +591,6 @@ module tetrium_exec #(
     n_p0_r  = (m_w || f1) ? r1 : {1'b0, r1[1:0]};
     n_p0_be = (m_w || f1) ? m_wbe : (r1[2] ? 3'b010 : 3'b001);
     n_p0_hi = !m_w && !f1 && r1[2];
-    n_p0_sp = 1'b0;
     n_p1_en = isgpr(m_d2);
     n_p1_r  = (m_w || f2) ? r2 : {1'b0, r2[1:0]};
     n_p1_be = (m_w || f2) ? m_wbe : (r2[2] ? 3'b010 : 3'b001);
@@ -612,17 +602,17 @@ module tetrium_exec #(
               (m_eop == E_LDV86) ? 3'd1 : m_sreg;
     case (m_eop)
       E_MUL, E_DIV: begin
-        n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = m_w ? m_wbe : 3'b011; n_p0_sp = 1'b1;
+        n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = m_w ? m_wbe : 3'b011;
         n_p1_en = m_w;  n_p1_r = 3'd2; n_p1_be = m_wbe; n_p1_sp = 1'b1;
       end
-      E_AAM, E_AAD, E_AAA, E_AAS: begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = 3'b011; n_p0_sp = 1'b1; end
-      E_DAA, E_DAS, E_SALC:       begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = 3'b001; n_p0_sp = 1'b1; end
-      E_LAHF:                     begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = 3'b010; n_p0_sp = 1'b1; end
+      E_AAM, E_AAD, E_AAA, E_AAS: begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = 3'b011; end
+      E_DAA, E_DAS, E_SALC:       begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = 3'b001; end
+      E_LAHF:                     begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = 3'b010; end
       // CBW: AH <- sign(AL);  CWDE: EAX[31:16] <- sign(AX)
-      E_CBW: begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = (m_sz == 2'd2) ? 3'b100 : 3'b010; n_p0_sp = 1'b1; end
+      E_CBW: begin n_p0_en = 1'b1; n_p0_r = 3'd0; n_p0_be = (m_sz == 2'd2) ? 3'b100 : 3'b010; end
       // CWD: DX <- sign(AX);  CDQ: EDX <- sign(EAX)
-      E_CWD: begin n_p0_en = 1'b1; n_p0_r = 3'd2; n_p0_be = m_wbe; n_p0_sp = 1'b1; end
-      E_IN:  if (m_d1 == D_ACC) begin n_p0_r = 3'd0; n_p0_be = m_w ? m_wbe : 3'b001; n_p0_sp = 1'b1; end
+      E_CWD: begin n_p0_en = 1'b1; n_p0_r = 3'd2; n_p0_be = m_wbe; end
+      E_IN:  if (m_d1 == D_ACC) begin n_p0_r = 3'd0; n_p0_be = m_w ? m_wbe : 3'b001; end
       E_JFAR, E_IRET, E_LDCS: begin n_sw_en = 1'b1; n_sw_r = 3'd1; end
       // XADD r, r with one register: the sum is written last
       E_XADD: if (m_modrm[7:6] == 2'd3 && m_modrm[5:3] == m_modrm[2:0]) n_p1_en = 1'b0;
@@ -706,10 +696,10 @@ module tetrium_exec #(
     for (int i = 0; i < 4; i++) begin
       for (int b = 0; b < 4; b++)
         bk_bp[b] = ((2'(b) ^ dr[i][1:0]) & ~dr7[18 + 4*i +: 2]) == 2'b00;
-      n_ibm[i] = DEBUG_REGS && (m_ilin == dr[i]);
-      n_dbr[i] = DEBUG_REGS && n_rd && (dr7[16 + 4*i +: 2] == 2'b11) &&
+      n_ibm[i] = (m_ilin == dr[i]);
+      n_dbr[i] = n_rd && (dr7[16 + 4*i +: 2] == 2'b11) &&
                  (((m_lin[31:2] == dr[i][31:2]) && |(bk_ld[3:0] & bk_bp)) || ((m_lin[31:2] == drm1[i]) && |(bk_ld[7:4] & bk_bp)));
-      n_dbw[i] = DEBUG_REGS && n_wr && dr7[16 + 4*i] &&
+      n_dbw[i] = n_wr && dr7[16 + 4*i] &&
                  (((m_stl[31:2] == dr[i][31:2]) && |(bk_st[3:0] & bk_bp)) || ((m_stl[31:2] == drm1[i]) && |(bk_st[7:4] & bk_bp)));
     end
   end
@@ -722,7 +712,7 @@ module tetrium_exec #(
   always_ff @(posedge clk) begin
     if (!hold_e) begin
       eop <= m_eop; wrk <= m_wr; repz <= m_uw[UW_REPZ_L];
-      last <= m_last; bnd <= m_bnd; w <= m_w; sz <= m_sz; msz <= m_msz; op <= m_op; pg <= m_pg; modrm <= m_modrm;
+      last <= m_last; bnd <= m_bnd; sz <= m_sz; msz <= m_msz; op <= m_op; pg <= m_pg; modrm <= m_modrm;
       as32 <= m_as32;
       imm <= m_imm; ip_start <= m_ip_start; ip_next <= m_ip_next;
       sreg <= m_sreg; rep <= m_rep; pt <= m_pt; ptgt <= m_ptgt; inj <= m_inj; bid <= m_bid;
@@ -738,7 +728,6 @@ module tetrium_exec #(
       ld_ppn0 <= m_pppn; ld_ppn1 <= pgon ? m_pppn : m_lin4[31:12]; ld_pcd <= m_ppcd; xs_q <= m_xs;
       st_ppn0 <= (m_wr == WR_SEC) ? m_sppn : m_pppn;
       st_ppn1 <= !pgon ? ((m_wr == WR_SEC) ? m_slin4[31:12] : m_lin4[31:12]) : (m_wr == WR_SEC) ? m_sppn : m_pppn;
-      pok_q <= m_pok; sok_q <= m_sok; ucpl <= m_ucpl;
       lcross_q <= xpage(m_lin[11:0], m_msz);
       scross_q <= xpage((m_wr == WR_SEC) ? m_slin[11:0] : m_lin[11:0], m_sz);
       sv_q  <= m_uw[UW_SV_L]; mrd_q <= m_uw[UW_MRD_L] && !m_noacc;
@@ -752,10 +741,9 @@ module tetrium_exec #(
           wh0[3*i+l] <= n_p0_en && n_p0_r == 3'(i) && n_p0_be[l];
           wh1[3*i+l] <= n_p1_en && n_p1_r == 3'(i) && n_p1_be[l];
         end
-      p0_en <= n_p0_en; p0_r <= n_p0_r; p0_be <= n_p0_be; p0_hi <= n_p0_hi; p0_sp <= n_p0_sp;
+      p0_en <= n_p0_en; p0_r <= n_p0_r; p0_be <= n_p0_be; p0_hi <= n_p0_hi;
       p1_en <= n_p1_en; p1_r <= n_p1_r; p1_be <= n_p1_be; p1_hi <= n_p1_hi; p1_sp <= n_p1_sp;
       sw_en <= n_sw_en; sw_r <= n_sw_r;
-      t4_we <= 1'b0;
       tx_we <= {m_d1 == D_T9, m_d1 == D_T8, m_d1 == D_T7, m_d1 == D_T6, m_d1 == D_T5, m_d1 == D_T4};
       tw_we <= {(m_d1 == D_T3) || (m_d2 == D_T3), (m_d1 == D_T2) || (m_d2 == D_T2),
                 (m_d1 == D_T1) || (m_d2 == D_T1), (m_d1 == D_T0) || (m_d2 == D_T0)};
@@ -768,7 +756,7 @@ module tetrium_exec #(
       ibm <= n_ibm; dbr <= |dr7[7:0] ? n_dbr : 4'h0; dbw <= (|dr7[7:0] && !n_stsup) ? n_dbw : 4'h0;
       dbtr <= |(n_dbr & db_en); dbtw <= |(n_dbw & db_en) && !n_stsup;
       ibh <= |(n_ibm & ib_en);
-      gdq <= DEBUG_REGS && ((m_eop == E_TRD) || (m_eop == E_TWR)) && !m_op[2] && dr7[13];
+      gdq <= ((m_eop == E_TRD) || (m_eop == E_TWR)) && !m_op[2] && dr7[13];
       c_asub <= n_asub; c_acf <= n_acf;
       c_logic <= n_logic; c_lop <= n_lop; c_rsel <= n_rsel;
     end else if (e_pdone && w_ok)
@@ -784,7 +772,7 @@ module tetrium_exec #(
   assign e_busy_valid = v;
 
   // ---------------------------------------------------------------- address translation (paging)
-  // M uses the last-page registers checked in A2.  When they missed (and the TLB in the
+  // M uses the micro-TLB entries looked up in A2.  When they missed (and the TLB in the
   // M replay too), lack the rights, a write needs D, or an access crosses into the next
   // page, E translates here through the walker (TLB first) before the access, in
   // 86Box's order: load (low page, high page), then store (low, high).  The store's
@@ -796,7 +784,7 @@ module tetrium_exec #(
   // has settled; the fetch walk takes longer anyway)
   logic [2:0] e_idle;
   always_ff @(posedge clk) e_idle <= rst ? 3'b000 : {e_idle[1:0], !v && !flush_r};
-  wire        ff_take = ff_go && !v && !flush_r && !halted && (xs == X_IDLE) && (&e_idle || !DEBUG_REGS);
+  wire        ff_take = ff_go && !v && !flush_r && !halted && (xs == X_IDLE) && &e_idle;
   // an instruction breakpoint on an instruction whose fetch faults: #DB first (a code
   // breakpoint ranks above the faults of fetching the instruction); the architectural
   // EIP's linear address against DR0-3, registered (only used once E has drained)
@@ -804,9 +792,9 @@ module tetrium_exec #(
   logic [3:0]  ffbm;
   always_ff @(posedge clk) begin
     ilin_a <= cs_base + ip_arch;
-    for (int i = 0; i < 4; i++) ffbm[i] <= DEBUG_REGS && (ilin_a == dr[i]) && ib_en[i];
+    for (int i = 0; i < 4; i++) ffbm[i] <= (ilin_a == dr[i]) && ib_en[i];
   end
-  wire ffbp     = DEBUG_REGS && |ffbm && !rf && !ssp_q;
+  wire ffbp     = |ffbm && !rf && !ssp_q;
   wire ff_db    = ff_take && ffbp;
   // crossing into the next page: load (size msz) / store (size sz)
   // (the needs are registered at E entry: they feed the stall network)
@@ -828,7 +816,7 @@ module tetrium_exec #(
   // translation steps still needed, kept in a register (it feeds the stall network):
   // loaded at E entry, a step cleared when its walk succeeds, all on a static check fault.
   // At entry the low-page steps are also needed when the CPL changed after M checked
-  // the rights: M saw another CPL (ucpl), or the uop leaving E now is one that writes
+  // the rights: M saw another CPL (m_ucpl), or the uop leaving E now is one that writes
   // the CPL (conservative: a TLB lookup when it kept the CPL).
   logic [3:0] tn;
   wire        cplw   = (eop == E_LDCS) || (eop == E_LDV86) || (eop == E_TLFL) ||
@@ -1063,8 +1051,8 @@ module tetrium_exec #(
 
   // ---------------------------------------------------------------- shifter
   // count: 1 (D0 / D1), CL (D2 / D3) or imm8 (C0 / C1), masked to 5 bits.
-  // One function serves the single-cycle shift by one and the registered
-  // shift by a variable count.  Returns {of, cf, result}.
+  // shf: the single-cycle shift by one (a variable count goes through the funnel
+  // shifter below).  Returns {of, cf, result}.
 `include "modtab.svh"
   function automatic logic [33:0] shf(input logic [31:0] xin, input logic [4:0] n, input logic [2:0] o,
                                       input logic [1:0] z, input logic c);
@@ -1243,7 +1231,7 @@ module tetrium_exec #(
   logic [31:0] dq, ddv;
   logic [5:0]  dcnt;
   logic        dneg_q, dneg_r, derr_pre, dsigned;
-  logic        dv_aam, dv_sgn;
+  logic        dv_sgn;
   logic [1:0]  dsz;          // size of the divide in progress
   logic [63:0] dv_dd;
   logic [31:0] dv_dvs;
@@ -1323,8 +1311,8 @@ module tetrium_exec #(
     endcase
     x1 = (eop == E_MUL) ? ((sz == 2'd2) ? mp[63:32] : {16'h0, mp[31:16]}) : drem[31:0];
   end
-  // system register reads (SMSW SLDT STR SGDT SIDT, MOV r,CRn / TRn): two E cycles, the
-  // value registered in the first (keeps these sources off the result mux)
+  // system register reads (SMSW SLDT STR SGDT SIDT, MOV r,CRn / DRn / TRn, CPUID): two E
+  // cycles, the value registered in the first (keeps these sources off the result mux)
   logic [31:0] srd_n, srd_q;
   always_comb begin
     srd_n = '0;
@@ -1456,7 +1444,6 @@ module tetrium_exec #(
 
   // POPF / IRET in protected mode: IOPL only at CPL 0, IF only at CPL <= IOPL
   // (V86: CPL is 3, IOPL never changes)
-  wire pmode   = cr0[0] && !vm;
   wire iopl_ok = !cr0[0] || (!vm && (cpl == 2'd0));
   wire if_ok   = !cr0[0] || (cpl <= iopl);
   // (registered: one cycle behind its sources.  POPF can change IOPL only at CPL 0, where it
@@ -1586,41 +1573,36 @@ module tetrium_exec #(
                          ((ck == CK_CSJ) || (ck == CK_CSC) || (ck == CK_CSR)) &&
                          (op == 8'h9A || op == 8'hEA || op == 8'hCA || op == 8'hCB || op == 8'hFF);
   wire        fhit_l   = (ptgt == ipz(t2));
-  logic        redir, csw, br_taken, brtrain;
+  logic        redir, br_taken, brtrain;
   // (REPZ ended by the compare always flushes and refetches from ip_arch anyway,
   // a REP ended by CX reaches E as A's RETIRE marker with last set)
   wire         nbmisp = pt && (abr_e == 3'(ABR_NONE)) && !is_br && (eop != E_JNEAR) && last;
-  logic [15:0] redir_cs;
-  logic [31:0] redir_ip, br_tgt;
+  logic [31:0] br_tgt;
   always_comb begin
-    redir = 1'b0; csw = 1'b0; redir_cs = s[1]; redir_ip = ip_next;
+    redir = 1'b0;
     br_taken = 1'b0; br_tgt = tgt; brtrain = 1'b0;
     case (eop)
       E_JCC, E_LOOPCC: begin
         br_taken = br_cond; brtrain = 1'b1;
         redir = pt ? (!br_cond || !tgteq) : br_cond;
-        redir_ip = br_cond ? tgt : ip_next;
       end
       E_JNEAR: begin
         br_taken = 1'b1; br_tgt = ip_a; brtrain = 1'b1;
         redir = !pt || !tgt_hit;
-        redir_ip = ip_a;
       end
       // real mode / V86 far transfer: one that keeps CS is a near transfer for the
       // predictor (BTB / return stack, trained as call / ret / jump); no redirect when it
       // was predicted
       E_JFAR: begin
-        csw = 1'b1; redir_cs = A[15:0]; redir_ip = ip_b;
         br_taken = 1'b1; br_tgt = far_t; brtrain = far_p;
         redir = !(far_p && pt && (fsame ? fhit_n : fhit_f));
       end
-      E_IRET: begin redir = 1'b1; csw = 1'b1; redir_cs = t1[15:0]; redir_ip = ip_t; end
+      E_IRET:  redir = 1'b1;
       E_LDCS: begin
-        csw = 1'b1; redir_ip = ipz(t2);
         br_taken = 1'b1; br_tgt = ipz(t2); brtrain = pfar;
         redir = !(pfar && pt && fhit_l);
       end
-      E_LDV86: begin redir = 1'b1; csw = 1'b1; redir_ip = {16'h0, t2[15:0]}; end
+      E_LDV86: redir = 1'b1;
       // LTR: serializing (A uses the TR base); LLDT: interlocked in A2
       E_DHI:  redir = (ck == CK_TSS);
       E_SWR, E_TWR, E_INVLPG, E_CINV: redir = 1'b1;      // serializing: refetch the next instruction
@@ -1897,14 +1879,16 @@ module tetrium_exec #(
                  ((eop == E_ARPL) && !arpl_c_r);
   // ARPL: the destination's RPL raised;  LAR / LSL / VERR / VERW: valid descriptor
   wire arpl_c_r = (A[1:0] < B[1:0]);
+  // system descriptor types LAR / LSL accept (bit per type)
+  localparam logic [15:0] LAR_TY = 16'h1A3E, LSL_TY = 16'h0A0E;
   logic lv_ok_r;
   always_comb begin
     logic nc;
     nc = !(dty[3] && dty[2]) || dsy;                     // not a conforming code segment
     lv_ok_r = !dnull && !dover;
     case (ck)
-      CK_LAR:  if (dsy && !((16'h1A3E >> dty) & 16'h1)) lv_ok_r = 1'b0;
-      CK_LSL:  if (dsy && !((16'h0A0E >> dty) & 16'h1)) lv_ok_r = 1'b0;
+      CK_LAR:  if (dsy && !LAR_TY[dty]) lv_ok_r = 1'b0;
+      CK_LSL:  if (dsy && !LSL_TY[dty]) lv_ok_r = 1'b0;
       CK_VERR: if (dsy || (dty[3] && !dty[1])) lv_ok_r = 1'b0;
       default: if (dsy || dty[3] || !dty[1]) lv_ok_r = 1'b0;     // VERW
     endcase
@@ -1935,7 +1919,7 @@ module tetrium_exec #(
   // exception delivery), MOV DRn with DR7.GD (fault, DR6.BD)
   // (not on the instruction after MOV / POP SS: 86Box runs the pair as one, as the 486
   // holds debug exceptions over it)
-  wire  ibf    = DEBUG_REGS && ifst && !inj && !rf && !ssp_q && ibh;
+  wire  ibf    = ifst && !inj && !rf && !ssp_q && ibh;
   wire  gdflt  = gdq;
   wire  tstop  = chk_flt || acp || ibf;
   // IN / OUT / INS / OUTS: a fault found before the port access (#PF or #AC of the memory
@@ -1972,7 +1956,6 @@ module tetrium_exec #(
                  ((eop == E_JFAR) && c_jn && jn_q) ||
                  (rmv && (sz == 2'd2) && (eop == E_IRET) && (t0[31:16] != 16'h0));
   wire ipflt_b = tbad && is_br && br_cond;
-  wire ipflt   = ipflt_x || ipflt_b;
   // MOV CR0 with PG and not PE, or NW and not CD: #GP;  ESC with CR0.EM / TS, WAIT with MP and TS: #NM
   wire crflt   = (eop == E_SWR) && (srf == 3'd7) && (modrm[5:3] == 3'd0) &&
                  ((B[31] && !B[0]) || (B[29] && !B[30]));
@@ -2096,7 +2079,7 @@ module tetrium_exec #(
   logic [3:0] dbacc;
   wire  [3:0] db_cur  = !dbdel ? (dbr | (st_real ? dbw : 4'h0)) : 4'h0;
   wire  [3:0] dbacc_n = dbacc | db_cur;
-  wire        take_dbt = DEBUG_REGS && !dbdel && (|(dbacc & db_en) || dbtr || (dbtw && st_real));
+  wire        take_dbt = !dbdel && (|(dbacc & db_en) || dbtr || (dbtw && st_real));
   // the T bit of a new 386 TSS: a trap after the task switch (any cause)
   logic       tsk_tb;
   // (data breakpoints and the T bit also at the end of an interrupt / exception delivery:
@@ -2201,7 +2184,7 @@ module tetrium_exec #(
   end
 
   // A-executed uops already wrote their result into the A-copy
-  // (registered: = (pend && !p_aex) ? pwh0/1 : 0, the A1 bypass reads them)
+  // (registered: pwh0/1 of a pending write (pend) not made by A, the A1 bypass reads them)
   always_ff @(posedge clk) begin
     ewh0 <= (!rst && wcommit_x && !aex && !gpr_sup) ? wh0 : 24'h0;
     ewh1 <= (!rst && wcommit_x && !aex && !gpr_sup) ? wh1 : 24'h0;
@@ -2244,7 +2227,7 @@ module tetrium_exec #(
       {nt, iopl, of, df, ifl, tf, af, cf} <=
         {init_flags[14:12], init_flags[11], init_flags[10], init_flags[9], init_flags[8], init_flags[4], init_flags[0]};
       ip_arch <= init_ip;
-      t0 <= '0; t1 <= '0; t2 <= '0; t3 <= '0; t4 <= '0;
+      t0 <= '0; t1 <= '0; t2 <= '0; t3 <= '0;
       ldt_sel <= '0; ldt_base <= '0; ldt_lim <= '0;
       tr_sel <= '0; tr_base <= '0; tr_lim <= '0; tr_acc <= 8'h8B;
       rf <= 1'b0; vm <= 1'b0; ac <= 1'b0; idf <= 1'b0; cpl <= 2'd0; ss_b <= 1'b0; gcnt <= '0;
@@ -2258,7 +2241,7 @@ module tetrium_exec #(
       // RF: cleared as an instruction (REP iteration) starts; set in the image an
       // instruction breakpoint pushes (86Box's debug-register path)
       // (not in the load of a new task, whose uops all count as first: RF comes from its TSS)
-      if (DEBUG_REGS && first && !inj && !tswl) rf <= ibf;
+      if (first && !inj && !tswl) rf <= ibf;
       // a fault after an SS load of the same instruction: SS (selector, B) back to its start value
       if (fault_x && ss_chg) begin s[2] <= ss0_sel; ss_b <= ss0_b; end
       // a task switch whose LDT selector faults (#TS) leaves it in LDTR, the cache unusable
@@ -2352,13 +2335,13 @@ module tetrium_exec #(
       // compare, then the store faults): the instruction leaves them unchanged
       // (fault_x: the Jcc target / MOV CR0 faults are single-uop instructions, never !first)
       if (fault_x && !first) begin of <= fl0[5]; af <= fl0[2]; cf <= fl0[0]; end
-      if (DEBUG_REGS && fault) rf <= 1'b1;             // every fault pushes RF = 1 (386 / 486 manuals)
+      if (fault) rf <= 1'b1;             // every fault pushes RF = 1 (386 / 486 manuals)
     end
     if (!rst && ff_take && !ffbp) cr2 <= ff_lin;
     // a trap or interrupt between two iterations of a REP instruction pushes RF = 1: the
     // instruction goes on without meeting its breakpoint again (SDM 17.3.1.1)
-    if (!rst && DEBUG_REGS && ext_int && ret_here && !repz_end) rf <= 1'b1;
-    if (!rst && DEBUG_REGS && ff_take) rf <= 1'b1;   // (a fault of the fetch, an instruction breakpoint)
+    if (!rst && ext_int && ret_here && !repz_end) rf <= 1'b1;
+    if (!rst && ff_take) rf <= 1'b1;   // (a fault of the fetch, an instruction breakpoint)
   end
   // debug registers: MOV DRn (DR4 / DR5 are DR6 / DR7), DR6 status (B bits of the
   // breakpoints matched, BS single step, BD general detect), DR7.GD cleared as #DB is
@@ -2378,17 +2361,15 @@ module tetrium_exec #(
       for (int i = 0; i < 4; i++) begin dr[i] <= '0; drm1[i] <= '1; end
       dr6_b <= 4'h0; dr6_h <= 4'h1; dr7 <= 32'h0000_0400;
     end else begin
-      if (DEBUG_REGS) begin
-        if (complete && !fault_x && iend) dr6_b <= dr6_b | dbacc_n;     // (B bits of a completed uop)
-        if (complete && ibf) dr6_b <= dr6_b | (ibm & ib_en);
-        if (ff_db) dr6_b <= dr6_b | ffbm;
-        if (db_flt && !ibf) dr6_h[1] <= 1'b1;
-        if (retire_dbt_n && tf) dr6_h[2] <= 1'b1;
-        if (retire_dbt_n && tsk_tb) dr6_h[3] <= 1'b1;
-        if (db_entry) dr7[13] <= 1'b0;
-        // (a task switch clears the local enables L0-L3)
-        if (wcommit && (eop == E_LDTSK)) begin dr7[0] <= 1'b0; dr7[2] <= 1'b0; dr7[4] <= 1'b0; dr7[6] <= 1'b0; end
-      end
+      if (complete && !fault_x && iend) dr6_b <= dr6_b | dbacc_n;     // (B bits of a completed uop)
+      if (complete && ibf) dr6_b <= dr6_b | (ibm & ib_en);
+      if (ff_db) dr6_b <= dr6_b | ffbm;
+      if (db_flt && !ibf) dr6_h[1] <= 1'b1;
+      if (retire_dbt_n && tf) dr6_h[2] <= 1'b1;
+      if (retire_dbt_n && tsk_tb) dr6_h[3] <= 1'b1;
+      if (db_entry) dr7[13] <= 1'b0;
+      // (a task switch clears the local enables L0-L3)
+      if (wcommit && (eop == E_LDTSK)) begin dr7[0] <= 1'b0; dr7[2] <= 1'b0; dr7[4] <= 1'b0; dr7[6] <= 1'b0; end
       if (wcommit_x && (eop == E_TWR) && !op[2])
         if (!modrm[5]) begin
           dr[modrm[4:3]] <= B; drm1[modrm[4:3]] <= B[31:2] - 30'd1;
@@ -2476,7 +2457,6 @@ module tetrium_exec #(
       lw1 <= p1_v;
       pwh0 <= wh0;
       pwh1 <= wh1;
-      p_aex <= aex;
       p_dmask <= dmask;
     end
   end
@@ -2517,7 +2497,6 @@ module tetrium_exec #(
             end
           end
           if (act && !ldwait && !fsel_any && start_div && !hold_w) begin
-            dv_aam <= (eop == E_AAM);
             dv_sgn <= (eop == E_DIV) && modrm[3];
             dsz    <= (eop == E_AAM) ? 2'd0 : sz;                 // AAM is an 8-bit divide
             dv_dd  <= (eop == E_AAM) ? {56'd0, A[7:0]} :
@@ -2624,7 +2603,6 @@ module tetrium_exec #(
   // redirect / return addresses: the architectural CS:IP written by the uop
   // that completed in the previous cycle (no further completion can happen
   // while a flush is pending)
-  assign rd_ret = ip_arch;
   assign rd_ip  = ip_arch;
   assign rd_csb = cs_base;
   // INTA waits for io_ok one cycle late (registered off the BIU / store buffer
@@ -2689,9 +2667,6 @@ module tetrium_exec #(
       retire_dbt <= retire_dbt_n;
       if (complete) begin
         // data registers: simple enables; control flags carry the conditions
-        rd_vec   <= do_inj_a ? inj_vec : ipflt_b ? 8'd13 : ((take_nmi && !take_trap) ? 8'd2 : 8'd1);
-        rd_ecv   <= do_inj_a ? inj_ecv : ipflt_b;
-        rd_errc  <= inj_err;
         rd_injid <= uj_take ? uj_id : int_id;
         rd_imm   <= uj_take ? imm : {24'h0, do_inj_a ? inj_vec : ipflt_b ? 8'd13 : ((take_nmi && !take_trap) ? 8'd2 : 8'd1)};
         // (the load part of a task switch restarts and faults at the new task's EIP)
@@ -2716,19 +2691,19 @@ module tetrium_exec #(
       if (halted && (nmi_go || (!shutdown && intr && ifl))) begin
         flush_r <= 1'b1; rd_stop <= 1'b1;
         rd_inject <= nmi_go;
-        rd_vec <= 8'd2; rd_imm <= 32'd2;
+        rd_imm <= 32'd2;
         rd_injid <= int_id; rd_ips <= ip_arch; rd_ipn <= ip_arch; rd_os32 <= 1'b0; rd_op <= 8'hCD; rd_int <= 1'b1;
         rd_ecvx <= 1'b0;
       end
       if (ff_take) begin                            // fetch #PF (or the #DB of a breakpoint there)
         flush_r <= 1'b1; rd_stop <= 1'b1; rd_inject <= 1'b1;
-        rd_vec <= ffbp ? 8'd1 : 8'd14; rd_imm <= ffbp ? 32'd1 : 32'd14; rd_ecv <= !ffbp; rd_errc <= {13'h0, ff_err};
+        rd_imm <= ffbp ? 32'd1 : 32'd14;
         rd_injid <= int_id; rd_ips <= ip_arch; rd_ipn <= ip_arch; rd_os32 <= 1'b0; rd_op <= 8'hCD; rd_int <= 1'b1;
         rd_ecvx <= !ffbp;
       end
       if (xs == X_INTA && io_done) begin
         flush_r <= 1'b1; rd_stop <= 1'b1; rd_inject <= 1'b1;
-        rd_vec <= io_rdata[7:0]; rd_imm <= {24'h0, io_rdata[7:0]};
+        rd_imm <= {24'h0, io_rdata[7:0]};
         rd_injid <= int_id; rd_ips <= ip_arch; rd_ipn <= ip_arch; rd_os32 <= 1'b0; rd_op <= 8'hCD; rd_int <= 1'b1;
         rd_ecvx <= 1'b0;
       end
@@ -2738,7 +2713,6 @@ module tetrium_exec #(
     be_tgt   <= br_tgt;
     // BTB kind: 0 conditional, 1 call, 2 return, 3 other unconditional
     be_kind  <= is_ret ? 2'd2 : is_call ? 2'd1 : is_br ? 2'd0 : 2'd3;
-    be_pt    <= pt;
     be_ind   <= (eop == E_JNEAR) && !pg && (op == 8'hFF);
     be_tcw   <= (eop == E_JNEAR) && !pg && (op == 8'hFF) && (!pt || !tgt_hit);   // (not via redir)
     be_inval <= nbmisp;
@@ -2762,7 +2736,7 @@ module tetrium_exec #(
       $display("E %0t %08x eop=%0d ck=%0d A=%08x B=%08x t0..3=%08x %08x %08x %08x flt=%0d vec=%0d err=%04x xc=%0d",
                ecyc, ip_start, eop, ck, A, B, t0, t1, t2, t3, fault, inj_vec, inj_err, xc);
   always_ff @(posedge clk)
-    if (etr && complete && DEBUG_REGS)
+    if (etr && complete)
       $display("  db: dbr=%h dbw=%h dbtr=%0d dbtw=%0d dbacc=%h dbdel=%0d last=%0d bnd=%0d inj=%0d uj=%0d want=%0d tdbt=%0d ld_lin=%08x mrd=%0d",
                dbr, dbw, dbtr, dbtw, dbacc, dbdel, last, bnd, inj, uj_take, want_int, take_dbt, ld_lin, mrd_q);
 `endif

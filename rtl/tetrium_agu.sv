@@ -36,8 +36,6 @@ module tetrium_agu (
     input  logic [31:0] c_disp,
     input  logic [31:0] c_imm,
     input  logic [31:0] c_ip_start,
-    input  logic [31:0] c_ip_op,
-    input  logic [3:0]  c_len,
     input  logic [31:0] c_ip_nx,
     input  logic [1:0]  c_rep,
     input  logic        c_os32,
@@ -160,7 +158,6 @@ module tetrium_agu (
     output logic [7:0]  ut_tsw,        //   entry index each
     output logic [31:12] dl_a,         // TLB D port (M replay)
     input  logic        dl_hit,
-    input  logic [1:0]  dl_way,
     input  logic [41:0] dl_e,
     output logic        dl_user,       // rights of the replayed access (checked per TLB way)
     output logic        dl_wr,
@@ -188,14 +185,12 @@ module tetrium_agu (
     output logic        ba_taken,
     output logic        ba_inval,
     output logic [1:0]  ba_kind,
-    output logic        ba_pt,
     output logic [3:0]  ba_bid,        // predictor snapshot id (training and A redirects)
     output logic        ra_rpush,
     output logic [31:0] ra_rip,
     output logic [31:0] ba_tgt,
     output logic        a2_valid,      // a uop in A2 (pipeline-empty checks)
     // A-copy for debug
-    output logic [15:0] a_sp_dbg,
     output logic [191:0] dbg_sbase,
     output logic [191:0] dbg_slim,
     output logic [59:0]  dbg_sattr      // per segment {nul, db, acc[7:0]}
@@ -212,7 +207,6 @@ module tetrium_agu (
   // ---------------------------------------------------------------- A-copy
   logic [31:0] g [8];
   logic        df;
-  assign a_sp_dbg = g[4][15:0];
   // descriptor caches (ES CS SS DS FS GS): base, limit, access byte, B/D, null (protected-mode
   // null selector: every access faults); cs_lim1 = CS limit + 1 (instruction end check)
   logic [31:0] sb [6], sl [6];
@@ -276,7 +270,6 @@ module tetrium_agu (
   wire [2:0] szb    = (asz == 2'd2) ? 3'd2 : ((asz == 2'd0) && !c_op[0]) ? 3'd1 : c_os32 ? 3'd4 : 3'd2;
   // address sizes: the instruction's for memory operands, strings and the
   // count register; the stack's for push / pop (16 bit until protected mode)
-  wire       is_ea  = (amode == AM_EA) || (amode == AM_EA2) || (amode == AM_EAC);
   wire       is_stk = (amode == AM_POP) || (amode == AM_POPN);
   wire       is_dsc = (amode == AM_DSCR) || (amode == AM_DSCI) || (amode == AM_DSCT);
   // T0 as the base: TA / TAS (segment-relative), DSCT (selector), TSS / LIN (system)
@@ -604,7 +597,6 @@ module tetrium_agu (
     ba_inval <= !a_res;
     ba_tgt   <= tgt;
     ba_kind  <= (abr == ABR_JMPD) ? (s_push ? 2'd1 : 2'd3) : 2'd0;   // call / jmp rel / LOOP, JCXZ
-    ba_pt    <= c_pt;
     ba_bid   <= c_bid;
     ra_rpush <= (abr == ABR_JMPD && s_push);    // redirecting CALL rel (stack restored first)
     ra_rip   <= c_ip_next;
@@ -814,7 +806,7 @@ module tetrium_agu (
   // (paging on) makes M replay the uop through the TLB (one cycle per address).
   //   entry {tag[16:0], ppn[19:0], U, W, D, PCD, PWT}
   localparam int PE_U = 4, PE_W = 3, PE_D = 2, PE_PCD = 1;
-  function automatic logic lp_ok(input logic [41:0] e, input logic user, input logic rd, input logic wr,
+  function automatic logic lp_ok(input logic [41:0] e, input logic user, input logic wr,
                                  input logic wpb);
     return !(user && !e[PE_U]) && !(wr && ((!e[PE_W] && (user || wpb)) || !e[PE_D]));
   endfunction
@@ -836,7 +828,7 @@ module tetrium_agu (
   // micro-TLB lookup: {ok (hit with the rights of the access), hit, micro way, TLB way, entry};
   // the rights are checked on every way of the set in parallel with the tag compares
   localparam int USB = `UT_SB, UWY = `UT_WAYS, UNS = 1 << USB;
-  function automatic logic [49:0] ulook(input logic [31:12] a, input logic user, input logic rd, input logic wr,
+  function automatic logic [49:0] ulook(input logic [31:12] a, input logic user, input logic wr,
                                         input logic wpb);
     // {ok, hit, entry index, TLB way, entry}: the ways of set a[12 +: USB]
     // (entries selected by compares with constants: an index times the entry width became
@@ -849,7 +841,7 @@ module tetrium_agu (
     for (int q = 0; q < UNS * UWY; q++)
       if ((q / UWY) == s) begin
         hi = ut_v[q] && (ut_e[q * 42 + 25 +: 17] == a[31:15]) && (USB >= 3 || ut_lo[q * 3 +: 3] == a[14:12]);
-        ok = ok || (hi && lp_ok(ut_e[q * 42 +: 42], user, rd, wr, wpb));
+        ok = ok || (hi && lp_ok(ut_e[q * 42 +: 42], user, wr, wpb));
         h = h || hi;
         if (hi) begin e = ut_e[q * 42 +: 42]; ix = 4'(q); tw = ut_w[q * 2 +: 2]; end
       end
@@ -885,7 +877,7 @@ module tetrium_agu (
     h0 = v0 && sumeq(bs[31:12+USB], of[31:12+USB], t0x[31:12+USB], cy);
     h1 = v1 && sumeq(bs[31:12+USB], of[31:12+USB], t1x[31:12+USB], cy);
     if (UWY == 1) return {1'b0, h0, st, w0, e0};
-    return {(h0 && lp_ok(e0, user, 1'b0, wr, wpb)) || (h1 && lp_ok(e1, user, 1'b0, wr, wpb)),
+    return {(h0 && lp_ok(e0, user, wr, wpb)) || (h1 && lp_ok(e1, user, wr, wpb)),
             h0 || h1, st[2:0], h1, h1 ? w1 : w0, h1 ? e1 : e0};
   endfunction
   function automatic logic [49:0] ufast(input logic [31:0] bs, input logic [31:0] of, input logic user,
@@ -899,12 +891,12 @@ module tetrium_agu (
     return lo[12] ? r1 : r0;
   endfunction
   localparam bit UFAST = (UWY <= 2) && (USB >= 2) && (UWY * UNS <= 16);
-  wire [49:0] upl_n  = UFAST ? ufast(sbase, bp.off, b_user, bp.pwr, wp) : ulook(ac_lin[31:12], b_user, b_mrd, bp.pwr, wp);
-  wire [49:0] usl_n  = UFAST ? ufast(ssb, bp.soff, b_user, 1'b1, wp) : ulook(slin[31:12], b_user, 1'b0, 1'b1, wp);
+  wire [49:0] upl_n  = UFAST ? ufast(sbase, bp.off, b_user, bp.pwr, wp) : ulook(ac_lin[31:12], b_user, bp.pwr, wp);
+  wire [49:0] usl_n  = UFAST ? ufast(ssb, bp.soff, b_user, 1'b1, wp) : ulook(slin[31:12], b_user, 1'b1, wp);
 `ifdef SIM
   // (the sum-addressed lookup must agree with the plain one whenever paging is on)
-  wire [49:0] upl_r = ulook(ac_lin[31:12], b_user, b_mrd, bp.pwr, wp);
-  wire [49:0] usl_r = ulook(slin[31:12], b_user, 1'b0, 1'b1, wp);
+  wire [49:0] upl_r = ulook(ac_lin[31:12], b_user, bp.pwr, wp);
+  wire [49:0] usl_r = ulook(slin[31:12], b_user, 1'b1, wp);
   always_ff @(posedge clk)
     if (UFAST && pg && b_adv && !hold_m && !rst && (upl_n[48:0] != upl_r[48:0] || usl_n[48:0] != usl_r[48:0] ||
         (UWY > 1 && (upl_n[49] != upl_r[49] || usl_n[49] != usl_r[49]))))
@@ -917,12 +909,11 @@ module tetrium_agu (
   // rights of the access, registered into M: with one way the set's entry is the only
   // candidate, so its rights are taken without the tag compare (a miss is replayed in M,
   // which writes the TLB's result, or 0 when the TLB misses too: the walk is left to E)
-  wire        pok_n  = (UWY == 1) ? lp_ok(pe_n, b_user, b_mrd, bp.pwr, wp) : upl_n[49];
-  wire        sok_n  = (UWY == 1) ? lp_ok(se_n, b_user, 1'b0, 1'b1, wp) : usl_n[49];
+  wire        pok_n  = (UWY == 1) ? lp_ok(pe_n, b_user, bp.pwr, wp) : upl_n[49];
+  wire        sok_n  = (UWY == 1) ? lp_ok(se_n, b_user, 1'b1, wp) : usl_n[49];
   logic        q_rpp, q_rps, q_phit, q_shit, q_pacc, q_sacc;
   logic [1:0]  q_pway, q_sway;
   logic [3:0]  q_puw, q_suw;     // micro-TLB entry of the hits
-  logic [41:0] q_pe, q_se;     // (for the M recheck after a replay)
   // (the replay ends with a re-read of the uop's own rows: one more cycle if E's late
   // port had the read port)
   logic        q_rr;

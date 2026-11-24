@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 ZbuntowanyKamulec
-// Tetrium configuration: caches, CPU identification, debug registers, TLBs, bus width
+// Tetrium configuration: caches, CPU identification, TLBs, bus width
 // (override with +define+NAME=value)
 `ifndef TETRIUM_CFG_SVH
 `define TETRIUM_CFG_SVH
@@ -27,10 +27,6 @@
 `ifndef HAS_CPUID
 `define HAS_CPUID 1
 `endif
-// i486 debug registers with instruction / data breakpoints (0: DR0-3 / DR6 / DR7 are storage only)
-`ifndef DEBUG_REGS
-`define DEBUG_REGS 1
-`endif
 // data micro-TLB in front of the TLB (A2 lookup): 2^UT_SB sets (linear[12 +: UT_SB], UT_SB <= 4) x
 // UT_WAYS ways (1, 2 or 4; at most 16 entries); UT_SB 0: fully associative
 `ifndef UT_SB
@@ -39,8 +35,8 @@
 `ifndef UT_WAYS
 `define UT_WAYS 1
 `endif
-// fetch micro-TLB: 2^FUT_SB entries direct-mapped by linear[12 +: FUT_SB], LUT RAM; a
-// fetch from a page it holds needs no TLB lookup
+// fetch micro-TLB: 2^FUT_SB entries (FUT_SB >= 1) direct-mapped by linear[12 +: FUT_SB],
+// LUT RAM; a fetch from a page it holds needs no TLB lookup
 `ifndef FUT_SB
 `define FUT_SB 4
 `endif

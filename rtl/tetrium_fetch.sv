@@ -59,7 +59,6 @@ module tetrium_fetch #(
     input  logic        btb_inval,     // drop the entry (not a branch)
     input  logic [31:0] btb_tgt,
     input  logic [1:0]  btb_kind,      // 0 jump / jcc, 1 call, 2 ret
-    input  logic        btb_pt,        // the branch was predicted taken by the BTB
     input  logic        btb_ind,       // an indirect near JMP / CALL (target cache)
     input  logic        btb_tcw,       //   ... that was mispredicted: write the target cache
     // line fill (to BIU)
@@ -82,7 +81,6 @@ module tetrium_fetch #(
     input  logic        hold_w,
     output logic        smc_hit,       // the store hit a valid I-cache line (self-modifying code)
     output logic        snp_hit,       // an external snoop hit a valid I-cache line
-    output logic        smc_busy,      // its invalidations are not all written yet
     output logic        smc_hold,      // hold W (invalidation queue filling up)
     // paging: the fetch micro-TLB, TLB F port, walker (non-speculative: only
     // once the pipeline has drained and decode waits for these bytes), page fault
@@ -110,12 +108,11 @@ module tetrium_fetch #(
     output logic [2:0]  ff_err,
     output logic [31:0] ff_lin,
     // status
-    output logic        busy_init,
     input  logic        inv_all,      // invalidate every line (INVD / WBINVD / FLUSH): the tag sweep
     output logic        inv_busy,     // ... requested or running
     output logic [31:0] cs_o
 );
-  genvar w, h, k;
+  genvar w, h;
 `include "ucode_class.svh"
 `include "tetrium_pdec.svh"
   // ---------------------------------------------------------------- state
@@ -135,7 +132,6 @@ module tetrium_fetch #(
   localparam int IROWB  = IWB - 3;
   localparam int ISETB  = IWB - LB;
   localparam int ITAGB  = 32 - IWB;
-  localparam int IBEATB = LB - 2;
   localparam int ITE    = ITAGB + 1;
   initial assert (IWB <= 12) else $error("I-cache way larger than 4 KB (IC_KB / IC_WAYS)");
   localparam int NSB    = `LINE_B / 8;                   // 8-byte sub-blocks per line
@@ -150,6 +146,7 @@ module tetrium_fetch #(
   // looks the TLB up (S_XL, two bubbles) or waits for a walk (S_FW), then fills it.
   localparam int FSB = `FUT_SB;
   localparam int FUN = 1 << FSB;
+  initial assert (FSB >= 1) else $error("FUT_SB must be at least 1");
   logic [FUN-1:0] fu_v;
   logic [1:0]     fu_way [FUN];
   wire  [FSB-1:0] fu_i = f_lin[12 +: FSB];
@@ -315,7 +312,7 @@ module tetrium_fetch #(
   //   (ind: indirect near JMP / CALL, whose target the target cache may predict)
   //   (partial tag: an alias above 1 MB is a wrong prediction like a stale entry,
   //   caught in decode / A / E)
-  logic        t_we, t_taken, t_inval, t_pt;
+  logic        t_we, t_taken, t_inval;
   logic [31:0] t_lin;
   logic [31:0] t_tgt;
   logic [1:0]  t_kind;
@@ -517,7 +514,6 @@ module tetrium_fetch #(
   wire [BW-1:0] be      = sel1 ? bw[1] : bw[0];
   wire [1:0]    be_kind = be[BW-1 -: 2];
   wire [2:0]    be_end  = be[34:32];
-  wire [31:0]   be_tgt  = be[31:0];
   // the target cache overrides the BTB's last target (one more bubble: the target is added
   // to f_cs in the first, off the per-way target adders)
   wire          wind0   = bw[0][BW-4] && (bw[0][BW-1 -: 2] != 2'd2);
@@ -528,7 +524,7 @@ module tetrium_fetch #(
     if (q_push) $display("F push lin=%05x ip=%04x hit=%b pt=%0d end=%0d kind=%0d tgt=%04x bid=%0d ctr=%h",
                          f_lin, f_ip, w_hit, pred_taken, be_end, be_kind, tgt_ip, bwp, gctr);
     if (redir_v) $display("F redir csb:ip=%08x:%08x src=%0d br=%0d tk=%0d nopred=%0d", redir_csb, redir_ip, redir_src, redir_br, redir_tk, redir_nopred);
-    if (t_we) $display("F train lin=%05x tk=%0d inval=%0d pt=%0d kind=%0d tgt=%04x way=%b", t_lin, t_taken, t_inval, t_pt, t_kind, t_tgt, t_way);
+    if (t_we) $display("F train lin=%05x tk=%0d inval=%0d kind=%0d tgt=%04x way=%b", t_lin, t_taken, t_inval, t_kind, t_tgt, t_way);
   end
 `endif
 
@@ -538,7 +534,7 @@ module tetrium_fetch #(
   always_ff @(posedge clk) begin
     t_we <= !rst && btb_we;
     t_taken <= btb_taken; t_inval <= btb_inval; t_lin <= btb_lin; t_tgt <= btb_tgt;
-    t_kind <= btb_kind; t_pt <= btb_pt; t_bid <= btb_bid; t_ind <= btb_ind; t_tcw <= btb_tcw;
+    t_kind <= btb_kind; t_bid <= btb_bid; t_ind <= btb_ind; t_tcw <= btb_tcw;
   end
   logic       rr_bit;                     // alternating victim when both ways are in use
   always_ff @(posedge clk)
@@ -753,7 +749,6 @@ module tetrium_fetch #(
   // be in the pipeline: E refetches at the next instruction boundary, as for a store.
   // A real 486 fetches past a jump only once it executes, so DMA'd code is always seen)
   assign snp_hit  = inv_pend;
-  assign smc_busy = (wq_n != 3'd0) || sh0_v || sh1_v || ws_h0 || ws_h1;
   // smc_hold = (wq_n != 0) || sh0_v || sh1_v, registered from their next values (W hold path)
   logic smc_hold_q;
   assign smc_hold = smc_hold_q;
@@ -880,7 +875,6 @@ module tetrium_fetch #(
 
   assign fill_req  = (st == S_FILL);
   assign cs_o      = f_cs;
-  assign busy_init = (st == S_INIT);
   logic  ia_pend;
   assign inv_busy  = ia_pend || (st == S_INIT);
 

@@ -53,9 +53,6 @@ static std::deque<std::pair<uint16_t, uint8_t>> dut_o, ref_o;
 #ifndef HAS_CPUID
 #define HAS_CPUID 1
 #endif
-#ifndef DEBUG_REGS
-#define DEBUG_REGS 1
-#endif
 #ifndef BUS_DW
 #define BUS_DW 32
 #endif
@@ -702,7 +699,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
             for (int i = 0; i < size; i++) ref_o.push_back({(uint16_t)(port + i), (uint8_t)(val >> (8 * i))});
             if (port == 0x92) ref_set_a20(val & 2); } };
         if (ref_init(16384, &lio)) { printf("%s REFERR\n", name.c_str()); return; }
-        ref_config(CPU_SIG, HAS_CPUID, DEBUG_REGS);
+        ref_config(CPU_SIG, HAS_CPUID, 1);
         inited = true;
     }
     const uint64_t ref_cyc0 = ref_cycles();
@@ -882,6 +879,10 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                             if (dn != mn) bl += snprintf(buf + bl, sizeof(buf) - bl, " %s.null=%u/%u", SN[k], dn, mn);
                         }
                         if (!(post.seg[k].sel & 0xFFFC) && k != 1) continue;
+                        // (a selector loaded without its descriptor, both null: e.g. a task switch
+                        // that faults on an earlier segment, SDM "Interrupt 10")
+                        if (k != 1 && !(post.eflags & 0x20000) && post.seg[k].base == 0xFFFFFFFFu &&
+                            (((uint64_t)S.top->dbg_sattr >> (k * 10 + 9)) & 1)) continue;
                         uint32_t db = S.top->dbg_sbase[k], dl = S.top->dbg_slim[k];
                         uint32_t da = (uint32_t)(((uint64_t)S.top->dbg_sattr >> (k * 10)) & 0x3FF);
                         uint32_t dacc = da & 0xFF, ddb = (da >> 8) & 1;
@@ -899,15 +900,13 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 }
                 if ((S.top->dbg_cr0 ^ post.creg0) & 0xE005002F)
                     bl += snprintf(buf + bl, sizeof(buf) - bl, " cr0=%08x/%08x", (uint32_t)S.top->dbg_cr0, post.creg0);
-                // (with AC, ID; RF with the debug registers: 86Box clears it per instruction only then)
-                uint32_t fm = (0x247FD5 | (DEBUG_REGS ? 0x10000 : 0)) & ~um;
-                if (DEBUG_REGS) {
-                    uint32_t mdr[8];
-                    ref_get_dr(mdr);
-                    if (S.top->dbg_dr6 != mdr[6] || S.top->dbg_dr7 != mdr[7])
-                        bl += snprintf(buf + bl, sizeof(buf) - bl, " dr6,7=%08x,%08x/%08x,%08x", (uint32_t)S.top->dbg_dr6,
-                                       (uint32_t)S.top->dbg_dr7, mdr[6], mdr[7]);
-                }
+                // (with AC, ID, RF)
+                uint32_t fm = 0x257FD5 & ~um;
+                uint32_t mdr[8];
+                ref_get_dr(mdr);
+                if (S.top->dbg_dr6 != mdr[6] || S.top->dbg_dr7 != mdr[7])
+                    bl += snprintf(buf + bl, sizeof(buf) - bl, " dr6,7=%08x,%08x/%08x,%08x", (uint32_t)S.top->dbg_dr6,
+                                   (uint32_t)S.top->dbg_dr7, mdr[6], mdr[7]);
                 if ((post.eflags & fm) != (dfl & fm))
                     bl += snprintf(buf + bl, sizeof(buf) - bl, " fl=%06x/%06x", dfl & fm, post.eflags & fm);
                 if (um) ref_set_flags(um, dfl);
@@ -974,7 +973,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                                        ib[oi] == 0xF0 || (ib[oi] >= 0x64 && ib[oi] <= 0x67))) oi++;
                     hist[ib[oi]]++;
                     if (!first[0])
-                        snprintf(first, sizeof(first), "insn %ld at %04x:%04x [%02x %02x %02x %02x %02x %02x %02x %02x]%s%s", ins,
+                        snprintf(first, sizeof(first), "insn %ld at %04x:%04x [%02x %02x %02x %02x %02x %02x %02x %02x]%s%.400s", ins,
                                  pre.seg[REF_CS].sel, pre.eip & 0xFFFF, ib[0], ib[1], ib[2], ib[3], ib[4], ib[5], ib[6], ib[7],
                                  inj ? " (injected)" : "", buf);
                     if (getenv("LOCKPRE")) {
