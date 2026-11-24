@@ -99,7 +99,7 @@ the first column point to the notes below.
 
 | FPGA | Tool | fmax | Logic | RAM | DSP |
 |---|---|---|---|---|---|
-| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 96.1–96.2 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 34 BRAM36 | 4 |
+| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 95.7–99.3 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 34 BRAM36 | 4 |
 | Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 82.5–85.7 MHz | 20.4k ALMs, 13.5k registers | 139 M10K, 90 kbit MLAB | 3 |
 
 The CPU alone (I/O as virtual pins), maximum-performance settings, three runs each
