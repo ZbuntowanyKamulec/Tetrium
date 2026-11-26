@@ -158,6 +158,54 @@ module tetrium_wb #(
     end
   end
 
+`ifdef SIM
+  // ---------------------------------------------------------------- checks (simulation)
+  // A behavioural copy of the queue, kept by the rules in the header (push, merge into the
+  // newest entry, pop at the head), checked against the RAM queue every cycle: pointers,
+  // banks, the count and the flip-flop copy of the newest entry (t_*).
+  // (a fixed ring, not a queue: the SoC simulation is built --savable, which cannot save queues)
+  typedef struct packed { logic nm; logic [31:2] a; logic [3:0] be; logic [31:0] d; } sbe_t;
+  localparam int SHN = SB_DEPTH + 4;
+  sbe_t shq [SHN];
+  int   sh_h, sh_n;                 // head index, entries
+  function automatic int shi(input int k); return (sh_h + k) % SHN; endfunction
+  always @(posedge clk) begin
+    if (rst) begin sh_h = 0; sh_n = 0; end
+    else begin
+      if (cnt != (AW+1)'(sh_n) || cnt > (AW+1)'(SB_DEPTH))
+        $fatal(1, "wb: store buffer count %0d, %0d entries queued (depth %0d)", cnt, sh_n, SB_DEPTH);
+      if (sb_v && {sb_adr, sb_be, sb_dat} != {shq[shi(0)].a, shq[shi(0)].be, shq[shi(0)].d})
+        $fatal(1, "wb: store buffer head %08x/%x/%08x, expected %08x/%x/%08x", {sb_adr, 2'b00}, sb_be, sb_dat,
+               {shq[shi(0)].a, 2'b00}, shq[shi(0)].be, shq[shi(0)].d);
+      if (cnt != 0 && {t_nm, t_a, t_be, t_d} != shq[shi(sh_n - 1)])
+        $fatal(1, "wb: copy of the newest entry (t_*) differs from the entry");
+      if (sb_pop) begin
+        if (sh_n == 0) $fatal(1, "wb: pop from an empty store buffer");
+        else begin sh_h = shi(1); sh_n = sh_n - 1; end
+      end
+      if (acc && !nowr) begin
+        if (merge) begin
+          sbe_t t;
+          if (sh_n < 1 || (sh_n < 2 && !sb_pop))
+            $fatal(1, "wb: merge into the head entry");
+          t = shq[shi(sh_n - 1)];
+          if (t.nm || t.a != w_a0 || !mrg0) $fatal(1, "wb: merge into a different word / a non-mergeable entry");
+          for (int b = 0; b < 4; b++) if (w_be0[b]) t.d[b*8 +: 8] = w_d0[b*8 +: 8];
+          t.be = t.be | w_be0;
+          shq[shi(sh_n - 1)] = t;
+        end else begin
+          sbe_t n;
+          n = {(hi_o ? !mrg1 : !mrg0), e0_a, e0_be, e0_d};
+          shq[shi(sh_n)] = n; sh_n = sh_n + 1;
+          if (two_e) begin n = {!mrg1, w_a1, w_be1, w_d1}; shq[shi(sh_n)] = n; sh_n = sh_n + 1; end
+        end
+        if (sh_n > SHN) $fatal(1, "wb: store buffer check ring overflow");
+      end
+      if (acc && !nowr && hold_w) $fatal(1, "wb: store accepted while held");
+    end
+  end
+`endif
+
   // ---------------------------------------------------------------- last store (for M)
   always_ff @(posedge clk) begin
     if (rst) l_st_v <= 1'b0;

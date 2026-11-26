@@ -742,6 +742,10 @@ ref_interrupt(int vector)
 {
     uint32_t addr;
 
+    /* an external interrupt wakes a HLT: the frame holds the address past it (as exec386) */
+    if (cpu_halted)
+        cpu_state.pc++;
+    cpu_halted = 0;
     flags_rebuild();
     oldcs           = CS;
     cpu_state.oldpc = cpu_state.pc;

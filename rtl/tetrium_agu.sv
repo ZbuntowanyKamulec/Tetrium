@@ -30,6 +30,10 @@ module tetrium_agu (
     input  logic [AF_BITS-1:0] a_af,
     input  logic [44:0] a_sel,
     input  logic [UW_BITS-1:0] a_uw,
+`ifdef UCOV
+    input  logic [ROM_AW-1:0] a_upc,
+    output logic [ROM_AW:0]   m_upc,   // {the uop runs (not skipped / killed), ROM address}
+`endif
     input  logic [7:0]  c_op,
     input  logic        c_pg,
     input  logic [7:0]  c_modrm,
@@ -129,6 +133,9 @@ module tetrium_agu (
     output logic [31:0] m_off,         // effective address (offset), for LEA
     output logic [31:0] m_slin,        // secondary (store) address
     output logic [31:2] m_slin4,
+    // bit 20 of the linear addresses before the A20 gate {slin4, slin, lin4, lin} (debug
+    // register compares: the 486 compares linear addresses, A20M# masks the physical one)
+    output logic [3:0]  m_l20,
     output logic        m_spw, output logic [31:0] m_spv,
     output logic        m_siw, output logic [31:0] m_siv,
     output logic        m_diw, output logic [31:0] m_div,
@@ -429,22 +436,27 @@ module tetrium_agu (
   // (E)CX of REP / LOOP / JCXZ from the A-copy itself (no bypass: the count
   // feeds the REP kill to decode); such uops wait for every older CX write
   wire  [31:0] cnt   = c_as32 ? g[1] : {16'h0, g[1][15:0]};
-  wire         cnt_z = (cnt == 32'd0);
-  wire         cnt_1 = (cnt == 32'd1);
+  wire         cnt_h = (cnt[31:1] == 31'd0);
+  wire         cnt_z = cnt_h && !cnt[0];
+  wire         cnt_1 = cnt_h && cnt[0];
   always_comb begin
-    logic [31:0] spi;
+    logic [31:0] spi, sis, dis, cxs;
     // (E)SP + size (+ imm16: RET n) at the stack address size
     spw = 1'b0;
     spi = ga[4] + {29'd0, szb} + ((amode == AM_POPN) ? {16'h0, c_imm[15:0]} : 32'h0);
     spv = st32 ? spi : {ga[4][31:16], spi[15:0]};
     if (amode == AM_POP || amode == AM_POPN) spw = 1'b1;
     if (s_push) begin spw = 1'b1; spv = sp_dec; end
+    // (16-bit address size: the low half of the same sum, the upper half kept)
+    sis  = ga[6] + step;
+    dis  = ga[7] + step;
+    cxs  = g[1] - 32'd1;
     siw  = (amode == AM_SI);
-    siv  = c_as32 ? ga[6] + step : {ga[6][31:16], ga[6][15:0] + step[15:0]};
+    siv  = {c_as32 ? sis[31:16] : ga[6][31:16], sis[15:0]};
     diw  = (amode == AM_DI) || (sec == SEC_STDI);
-    div_ = c_as32 ? ga[7] + step : {ga[7][31:16], ga[7][15:0] + step[15:0]};
+    div_ = {c_as32 ? dis[31:16] : ga[7][31:16], dis[15:0]};
     cxw  = (repchk && rep) || (abr == ABR_LOOP) || (abr == ABR_LOOPZ) || (abr == ABR_LOOPNZ);
-    cxv  = c_as32 ? g[1] - 32'd1 : {g[1][31:16], g[1][15:0] - 16'd1};
+    cxv  = {c_as32 ? cxs[31:16] : g[1][31:16], cxs[15:0]};
   end
 
   // ---------------------------------------------------------------- scoreboard
@@ -636,6 +648,9 @@ module tetrium_agu (
     logic [7:0]  ldm;
     logic        ld32, ldt0;
     logic        ldtw;         // loads LDTR (LLDT, task switch): the LDT base changes
+`ifdef UCOV
+    logic [ROM_AW:0] upc;
+`endif
   } ap_t;
   ap_t a1p, bp, mp;
   // plain 16/32-bit load into a GPR (E passes the memory operand unchanged)
@@ -659,6 +674,9 @@ module tetrium_agu (
       a1p.uw[UW_D2_L +: UW_D2_W]   = 5'(D_NONE);
     end
     a1p.last     = a_last;
+`ifdef UCOV
+    a1p.upc      = {!uskip && !killrep, a_upc};
+`endif
     a1p.bnd      = a_af[AF_ENDNR_L] && rep;
     a1p.w        = w;
     a1p.sz       = sz;
@@ -766,8 +784,10 @@ module tetrium_agu (
     sdb    = b_spush ? sd[2] : sd[0];
     snul   = b_spush ? sn[2] : sn[0];
   end
-  wire [31:0] ac_lin  = a20(sbase + bp.off);
-  wire [31:0] ac_lin4 = a20(sbase + bp.off + 32'd4);
+  wire [31:0] ac_lnr  = sbase + bp.off;               // (before the A20 gate)
+  wire [31:0] ac_l4r  = sbase + bp.off + 32'd4;
+  wire [31:0] ac_lin  = a20(ac_lnr);
+  wire [31:0] ac_lin4 = a20(ac_l4r);
   localparam int TLB = $clog2(`LINE_B);                 // D-cache geometry (tetrium_mem.sv)
   localparam int TWB = $clog2(`DC_KB * 1024 / `DC_WAYS);
   // D-cache rows (the BRAM read address): low 13 bits only
@@ -776,8 +796,10 @@ module tetrium_agu (
   assign ac_row  = rsum0[12:3];
   assign ac_row1 = rsum4[12:3];
   wire [31:0] ssb   = b_sdsc ? (b_dti ? e_ldtb : e_gdtb) : b_spush ? sb[2] : sb[0];
-  wire [31:0] slin  = a20(ssb + bp.soff);
-  wire [31:0] slin4 = a20(ssb + bp.soff + 32'd4);
+  wire [31:0] slnr  = ssb + bp.soff;
+  wire [31:0] sl4r  = ssb + bp.soff + 32'd4;
+  wire [31:0] slin  = a20(slnr);
+  wire [31:0] slin4 = a20(sl4r);
   // limit / rights descriptors of both accesses (see the limit check above)
   //   writable: access bit 1 (and, in protected mode, not code); execute-only: code without R
   function automatic logic [LC_W-1:0] lcd(input logic [31:0] lm, input logic [7:0] ac, input logic db,
@@ -950,6 +972,7 @@ module tetrium_agu (
       m_tset1 <= ac_lin[TLB] ? ac_lin[TWB-1:TLB+1] : ac_lin4[TWB-1:TLB+1];
       m_slin  <= slin;
       m_slin4 <= slin4[31:2];
+      m_l20   <= {sl4r[20], slnr[20], ac_l4r[20], ac_lnr[20]};
       // paging (off: identity, all rights)
       q_pacc  <= pgacc;
       m_noacc <= b_nacc;
@@ -996,6 +1019,9 @@ module tetrium_agu (
       end
     end
   end
+`ifdef UCOV
+  assign m_upc = mp.upc;
+`endif
   assign m_uw = mp.uw;       assign m_last = mp.last;     assign m_bnd = mp.bnd;
   assign m_w = mp.w;         assign m_sz = mp.sz;         assign m_msz = mp.msz;
   assign m_op = mp.op;       assign m_pg = mp.pg;         assign m_modrm = mp.modrm;

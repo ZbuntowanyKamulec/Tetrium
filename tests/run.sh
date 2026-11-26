@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 ZbuntowanyKamulec
 # Run test suites in one go: builds the simulator, runs the selected suites, keeps a log per
-# suite in the output directory and prints one result line per suite, then a summary.
+# suite in the output directory and prints one result line per suite, then a summary and the
+# microcode coverage (the ROM entries no simulation ran: <out>/ucov.txt, tools/ucov.py).
 # Exit status 0 when every suite passed (known, documented failures count as passed).
 #
 # usage: tests/run.sh [options] [suite | preset ...]          (default: quick)
@@ -23,14 +24,16 @@
 #             -n N     random programs per mode (quick 16, full 256)
 #             -w BW    bus width of the main build: 16, 32, 64, 128 (default 32)
 #             -o DIR   output directory (default build/run)
+#             -c       RTL coverage build (make COV=1): also lists the RTL branches no test reached
+#                      (<out>/vcov.txt, tools/vcov.py; the simulation is ~1.5x slower)
 #             -l       list the suites and presets
 set -u
 cd "$(dirname "$0")/.."
-JOBS=$(nproc); NPROG=""; BW=""; OUT=build/run; PRESET=quick
-usage() { sed -n '4,25p' "$0" | sed 's/^# \{0,1\}//'; }
-while getopts "j:n:w:o:lh" o; do
+JOBS=$(nproc); NPROG=""; BW=""; OUT=build/run; PRESET=quick; COV=""
+usage() { sed -n '4,29p' "$0" | sed 's/^# \{0,1\}//'; }
+while getopts "j:n:w:o:clh" o; do
   case $o in
-    j) JOBS=$OPTARG ;; n) NPROG=$OPTARG ;; w) BW=$OPTARG ;; o) OUT=$OPTARG ;;
+    j) JOBS=$OPTARG ;; n) NPROG=$OPTARG ;; w) BW=$OPTARG ;; o) OUT=$OPTARG ;; c) COV=1 ;;
     l|h) usage; exit 0 ;; *) usage; exit 2 ;;
   esac
 done
@@ -49,8 +52,16 @@ done
 [ -z "$NPROG" ] && { [ $PRESET = full ] && NPROG=256 || NPROG=16; }
 mkdir -p "$OUT"
 SUM=$OUT/summary.txt; : > "$SUM"
+# microcode coverage: every simulation writes the ROM addresses it ran here (tb_main.cpp)
+export UCOV_DIR=$(realpath "$OUT")/ucov
+rm -rf "$UCOV_DIR"; mkdir -p "$UCOV_DIR"
 FAILED=0
 if [ -n "$BW" ]; then SIM=build/sim_w$BW/Vtetrium_core; MK="BW=$BW"; else SIM=build/sim/Vtetrium_core; MK=""; fi
+if [ -n "$COV" ]; then
+  SIM=${SIM/build\/sim/build\/simcov}; MK="$MK COV=1"
+  export VCOV_DIR=$(realpath "$OUT")/vcov
+  rm -rf "$VCOV_DIR"; mkdir -p "$VCOV_DIR"
+fi
 export SIM
 
 # one result line: suite, PASS / FAIL, detail, seconds
@@ -203,5 +214,11 @@ if [ $T386 = 1 ]; then
   result test386 "$st" "$d" "$t"
 fi
 echo "----"
+python3 tools/ucov.py "$UCOV_DIR" > "$OUT/ucov.txt" 2>&1
+echo "$(head -1 "$OUT/ucov.txt") (list: $OUT/ucov.txt)" | tee -a "$SUM"
+if [ -n "$COV" ]; then
+  python3 tools/vcov.py "$VCOV_DIR" > "$OUT/vcov.txt" 2>&1
+  echo "$(head -1 "$OUT/vcov.txt") (list: $OUT/vcov.txt)" | tee -a "$SUM"
+fi
 [ $FAILED = 0 ] && echo "ALL PASSED (${#SUITES[@]} suites)" | tee -a "$SUM" || echo "$FAILED suite(s) FAILED" | tee -a "$SUM"
 [ $FAILED = 0 ]

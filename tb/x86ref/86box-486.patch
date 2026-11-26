@@ -2151,7 +2151,7 @@ index 640b08a4d..e6858e21e 100644
      temp = readmeml_n(cpu_state.ea_seg->base, ESI, addr64a);
      outl(DX, temp);
 diff --git a/src/cpu/x86seg.c b/src/cpu/x86seg.c
-index a0db998d4..f938b3fb0 100644
+index a0db998d4..061b4fa97 100644
 --- a/src/cpu/x86seg.c
 +++ b/src/cpu/x86seg.c
 @@ -92,6 +92,20 @@ x86seg_set_accessed(uint32_t addr, uint16_t word4)
@@ -2408,7 +2408,17 @@ index a0db998d4..f938b3fb0 100644
              cpu_cur_status &= ~CPU_STATUS_V86;
              if (!(type & 0x100))
                  cpu_state.flags &= ~I_FLAG;
-@@ -2893,6 +2959,7 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
+@@ -2851,7 +2917,8 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
+         cpu_state.eflags = img.flags >> 16;
+     } else {
+         cpu_state.flags = img.flags;
+-        cpu_state.eflags &= ~VM_FLAG; /* a 16-bit TSS has no VM */
++        cpu_state.eflags = 0;   /* Tetrium lockstep: a 16-bit TSS clears the upper EFLAGS word (VM, and
++                                   RF / AC / ID as on a 486 and in Bochs; RF is set while a fault is delivered) */
+     }
+     cpu_386_flags_extract();
+     for (int i = 0; i < 8; i++)
+@@ -2893,6 +2960,7 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
          cr3 = img.cr3;
          pae_load_pdptes(); /* used only with PAE paging */
          flushmmucache();

@@ -6,7 +6,8 @@ clock it runs integer code well beyond an i486, into Pentium territory, hence th
 only, like an i486SX.
 
 - Real, protected and virtual-8086 mode, paging, task switching, the i486 instruction set
-  (`CPUID`, debug registers, test registers `TR3`–`TR7`)
+  (`CPUID`, debug registers, test registers `TR3`–`TR7`; the cache test operations of `TR5`
+  are not modelled)
 - 8-stage pipeline, branch prediction, 16 KB 4-way instruction and data caches
 - Pipelined Wishbone B4 bus master, 16 / 32 / 64 / 128-bit data, with locked, I/O and
   interrupt-acknowledge cycles; cache snooping, `A20M`, `FLUSH`
@@ -99,8 +100,8 @@ the first column point to the notes below.
 
 | FPGA | Tool | fmax | Logic | RAM | DSP |
 |---|---|---|---|---|---|
-| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 95.7–99.3 MHz | 24.5k LUTs (2.4k as RAM), 11.8k FFs | 34 BRAM36 | 4 |
-| Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 82.8–87.0 MHz | 20.5k ALMs, 13.6k registers | 139 M10K, 90 kbit MLAB | 3 |
+| Artix-7 (`xc7a100t-1`) | Vivado 2025.2, implementation | 95.5–95.8 MHz | 23.7k LUTs (2.1k as RAM), 11.2k FFs | 30 BRAM36 | 4 |
+| Cyclone V (`5CSEBA6U23I7`) | Quartus 17, fit (worst corner) | 82.8–85.1 MHz | 19.4k ALMs, 12.9k registers | 88 M10K, 79 kbit MLAB | 3 |
 
 The CPU alone (I/O as virtual pins), maximum-performance settings, three runs each
 (Quartus seeds, Vivado placer directives).
@@ -122,8 +123,8 @@ On a MiSTer (ao486-based core, CPU at 69.23 MHz):
 
 | Benchmark | Result |
 |---|---|
-| Doom 1.9, `-timedemo demo3`, high detail, full screen | 40.48 FPS |
-| 3DBench 1.0c | 100.2 FPS |
+| Doom 1.9, `-timedemo demo3`, high detail, full screen | 40.66 FPS |
+| 3DBench 1.0c | 100.3 FPS |
 | CPU-Z 1.04 Vintage Edition, Windows 98 SE | 101.5 (Pentium 75 reference: 98.0) |
 
 ## Interface

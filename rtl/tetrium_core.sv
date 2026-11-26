@@ -95,7 +95,7 @@ module tetrium_core #(
   // fetch <-> decode
   logic q_full, q_push, q_pt;
   logic [63:0] q_data;
-  logic [223:0] q_pd;
+  logic [95:0] q_pd;
   logic [2:0] q_s, q_e;
   logic [31:0] q_ptgt;
   logic [31:3] q_lin;
@@ -119,6 +119,10 @@ module tetrium_core #(
   logic a_valid, a_vld_eff, a_last, a_repkill, hold_a, a2_valid;
   logic [AF_BITS-1:0] a_af;
   logic [UW_BITS-1:0] a_uw;
+`ifdef UCOV
+  logic [ROM_AW-1:0] a_upc;            // microcode coverage (testbench): ROM address in A / M
+  logic [ROM_AW:0]   m_upc;
+`endif
   logic [7:0] c_op, c_modrm;
   logic c_pg, c_os32, c_as32, c_lock, c_ud;
   logic [2:0] m_xc;
@@ -154,6 +158,7 @@ module tetrium_core #(
   logic [2:0] m_abr;
   logic [31:0] m_lin, m_slin, m_brlin;
   logic [31:2] m_lin4, m_slin4;
+  logic [3:0]  m_l20;
   logic m_spw, m_siw, m_diw, m_cxw;
   logic [31:0] m_spv, m_siv, m_div, m_cxv;
   logic [1:0]  m_sz, m_msz;
@@ -241,6 +246,10 @@ module tetrium_core #(
   logic [63:0] f_data;
   logic [31:0] rdata32;
   logic smc_hit, snp_hit, smc_hold;
+  // A20M# change (the cycle it changes): E refetches after the current instruction
+  logic a20_q;
+  always_ff @(posedge clk) a20_q <= a20m;
+  wire  a20_chg = !rst && (a20m != a20_q);
 
   // ---------------------------------------------------------------- paging (tetrium_mmu)
   wire         pgon = e_cr0[31] && e_cr0[0];
@@ -413,7 +422,7 @@ module tetrium_core #(
       .fill_req(if_req), .fill_line(if_line), .fill_we(if_we), .fill_row(f_row), .fill_hm(f_hm),
       .fill_data(f_data), .fill_done(if_done),
       .snp_v(isn_v), .snp_line(isn_l),
-      .wsn_v(w_v && !hold_w), .wsn_l0(w_lin[31:3]), .wsn_l1(w_l1),
+      .wsn_v(w_v && !hold_w), .w_occ(w_v), .wsn_l0(w_lin[31:3]), .wsn_l1(w_l1),
       .est_v(e_st_v), .est_l0(e_st_lin[31:3]), .est_l1(e_l1), .hold_w,
       .smc_hit, .snp_hit, .smc_hold,
       .pg(pg_f), .cpl3(cpl3_f), .fl_a, .fl_touch, .fl_hit, .fl_way, .fl_e, .lpf_kill, .tw_v, .tw_sw,
@@ -428,6 +437,9 @@ module tetrium_core #(
       .inject(d_inject), .inject_id(rd_injid), .inject_imm(rd_imm), .inject_ips(rd_ips), .inject_ipn(rd_ipn),
       .inject_os32(rd_os32), .inject_op(rd_op), .inject_int(rd_int), .inject_ecv(rd_ecvx), .inject_cnt(rd_cnt), .c_ecv,
       .hold_a, .a_repkill, .a_valid, .a_vld_eff, .a_last, .a_af, .a_sel, .a_uw,
+`ifdef UCOV
+      .a_upc,
+`endif
       .c_op, .c_pg, .c_modrm, .c_disp, .c_imm_o(c_imm), .c_ip_start, .c_ip_nx, .c_rep,
       .c_os32, .c_as32, .c_lock, .c_ud, .c_sreg, .c_pt, .c_ptgt, .c_bid, .c_inj, .c_srdm,
       .d_redir, .d_redir_ip, .d_btb_lin, .d_bid, .d_tbid, .q_empty(d_qempty), .d_starve);
@@ -435,6 +447,9 @@ module tetrium_core #(
   tetrium_agu u_agu (
       .clk, .rst,
       .a_vld_eff, .a_last, .a_af, .a_sel, .a_uw,
+`ifdef UCOV
+      .a_upc, .m_upc,
+`endif
       .c_op, .c_pg, .c_modrm, .c_disp, .c_imm, .c_ip_start, .c_ip_nx, .c_rep,
       .c_os32, .c_as32, .c_lock, .c_ud, .c_sreg, .c_pt, .c_ptgt, .c_bid, .c_inj, .c_srdm,
       .a_repkill, .hold_m, .hold_a, .a20m, .init_seg, .init_csbase, .flush_e(flush_r || rst), .e_gpr, .e_df, .e_pm, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_trl, .e_tss32, .c_ecv, .a_ssbase, .a_sacc, .e_ldtw,
@@ -445,7 +460,7 @@ module tetrium_core #(
       .ac_row, .ac_row1,
       .m_valid, .m_uw, .m_last, .m_bnd, .m_w, .m_sz, .m_msz, .m_op, .m_pg, .m_modrm, .m_imm, .m_disp, .m_ip_start,
       .m_ip_next, .m_sreg, .m_rep, .m_os32, .m_as32, .m_lock, .m_pt, .m_ptgt, .m_bid, .m_inj, .m_abr, .m_lin, .m_lin4, .m_tset0, .m_tset1, .m_off,
-      .m_slin, .m_slin4, .m_spw, .m_spv, .m_siw, .m_siv, .m_diw, .m_div, .m_cxw, .m_cxv,
+      .m_slin, .m_slin4, .m_l20, .m_spw, .m_spv, .m_siw, .m_siv, .m_diw, .m_div, .m_cxw, .m_cxv,
       .m_tgt, .m_tbad, .m_brlin, .m_cxnz, .m_ataken, .m_aex, .m_dmask, .m_amis, .m_xc, .m_xs,
       .pg(e_pgq), .wp(e_cr0[16]), .e_cpl, .ut_v, .ut_e, .ut_lo, .ut_w, .ut_tv, .ut_tsw,
       .dl_a, .dl_hit, .dl_e, .dl_user, .dl_wr, .dl_okp, .dl_okw, .m_rp, .x_act, .mlp_p_ld, .mlp_s_ld, .mlp_vpn, .lt_v(a_lt_v), .lt_sw(a_lt_sw),
@@ -475,14 +490,14 @@ module tetrium_core #(
       .m_ip_next, .m_sreg, .m_rep, .m_as32, .m_os32, .m_pt, .m_ptgt, .m_bid, .m_inj, .m_abr, .m_off,
       .m_spw, .m_spv, .m_siw, .m_siv, .m_diw, .m_div, .m_cxw, .m_cxv,
       .m_tgt, .m_tbad, .m_brlin, .m_cxnz, .m_ataken, .m_aex, .m_dmask, .m_ldm, .m_ld32, .m_ldt0, .m_amis, .m_xc, .m_xs, .m_data, .m_ldwait, .m_fwd,
-      .m_lin, .m_lin4, .m_slin, .m_slin4,
+      .m_lin, .m_lin4, .m_slin, .m_slin4, .m_l20,
       .m_pppn, .m_pok, .m_ppcd, .m_sppn, .m_sok, .m_ucpl, .e_st_xp,
       .mm_flush, .mm_invlpg, .mm_inva, .mm_lpkill, .e_cr3, .tr_we, .tr_sel7, .tr_d, .tr6, .tr7,
       .e_preq, .e_pa, .e_pwr, .e_puser, .e_pcpl3, .e_pdone, .w_ok, .w_err, .w_e, .e_lpp_ld, .e_lps_ld, .x_pcd,
       .ff_go, .ff_err, .ff_lin, .m_lock, .lk_hold, .e_gdtl, .e_idtl, .e_ldtl, .m_noacc,
       .x_act, .x_lin, .x_lin4, .x_sz, .x_data, .x_hit, .x_hb, .x_cached, .x_fill, .x_fill_done,
       .du_req, .du_done, .du_data(rdata32), .l_st_v,
-      .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,
+      .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .a20_chg, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,
       .e_gpr, .e_seg, .e_df, .e_t0, .e_byp_t0, .e_idtb, .e_gdtb, .e_ldtb, .e_trb, .e_trl, .e_tss32, .e_ldtw, .a_ssbase, .a_sacc, .e_flags, .e_ip, .e_pm, .e_cpl, .e_csd, .e_iochk, .e_pgq, .e_cr0, .e_sysdbg(dbg_sys),
       .ewh0, .ewh1, .ewv0, .ewv1,
       .esw_en, .esw_r, .esw_k, .esw_base, .esw_lim, .esw_acc, .esw_db, .esw_nul, .edf_en, .edf_v, .ss_snap, .ss_rest,
@@ -527,7 +542,29 @@ module tetrium_core #(
   assign dbg_flags = e_flags;
   assign dbg_cr0   = e_cr0;
   assign dbg_cpl   = e_cpl;
+`ifdef UCOV
+  // microcode coverage: the ROM address of every uop that completes in E (tb: uc_hit)
+  import "DPI-C" function void uc_hit(input int a);
+  logic [ROM_AW:0]   e_upc;
+  always_ff @(posedge clk) if (!hold_e) e_upc <= m_upc;
+  always_ff @(posedge clk) if (!rst && u_exec.complete && e_upc[ROM_AW]) uc_hit(int'(e_upc[ROM_AW-1:0]));
+`endif
 `ifdef SIM
+  // ---------------------------------------------------------------- checks (simulation)
+  // The A stage's speculative copy of the GPRs and DF (updated early by push / pop / string
+  // / loop uops, restored from E on a flush) equals E's once the pipeline behind it has been
+  // empty for 3 cycles (E's register writes reach the A-copy one cycle late).
+  logic [1:0] c_idle;
+  always_ff @(posedge clk) begin
+    if (rst || a_vld_eff || a2_valid || m_valid || e_valid) c_idle <= '0;
+    else if (c_idle != 2'd3) c_idle <= c_idle + 2'd1;
+    if (!rst && c_idle == 2'd3) begin
+      for (int i = 0; i < 8; i++)
+        if (u_agu.g[i] != e_gpr[i*32 +: 32])
+          $fatal(1, "core: A-copy of register %0d is %08x, E has %08x (pipeline empty)", i, u_agu.g[i], e_gpr[i*32 +: 32]);
+      if (u_agu.df != e_df) $fatal(1, "core: A-copy of DF is %0d, E has %0d (pipeline empty)", u_agu.df, e_df);
+    end
+  end
   assign dbg_perf = {
       7'd0,
       ba_we && be_we && pa_v,                    // 24 A BTB training replaced while waiting

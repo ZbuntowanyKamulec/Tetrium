@@ -35,7 +35,7 @@ module tetrium_decode (
     // block queue from fetch
     input  logic        q_push,
     input  logic [63:0] q_data,
-    input  logic [223:0] q_pd,      // per-byte predecode from the I-cache (pdec), 28 bits / byte
+    input  logic [95:0] q_pd,      // per-byte predecode from the I-cache (pdec), 12 bits / byte
     input  logic [2:0]  q_s,
     input  logic [2:0]  q_e,
     input  logic        q_pt,
@@ -70,6 +70,9 @@ module tetrium_decode (
     output logic [AF_BITS-1:0] a_af,
     output logic [44:0] a_sel,         // predecoded A-stage operand selects (tetrium_asel.svh)
     output logic [UW_BITS-1:0] a_uw,
+`ifdef UCOV
+    output logic [ROM_AW-1:0] a_upc,  // ROM address of a_uw (microcode coverage, testbench)
+`endif
     // instruction context for A
     output logic [7:0]  c_op,
     output logic        c_pg,          // 0F page opcode
@@ -201,21 +204,27 @@ module tetrium_decode (
   lf_t lfp [16];
   always_comb begin
     logic [24*PDW-1:0] three;
+    logic [191:0]      thrd;
     three = {qpd[2], qpd[1], qpd[0]};
+    thrd  = {qd[2], qd[1], qd[0]};
     for (int p = 0; p < 16; p++) begin
-      logic [PDW-1:0] a0, a1, a2;
-      logic       m, sb;
+      logic [PDW-1:0] a0, a1;
+      logic [7:0] b1, b2;                           // modrm and SIB candidates
+      logic       m, sb, ob;
       logic [2:0] ic, dp, im;
       a0 = three[p*PDW +: PDW];
       a1 = three[(p+1)*PDW +: PDW];
-      a2 = three[(p+2)*PDW +: PDW];
-      m  = pg1 ? a0[7] : a0[2];
-      ic = pg1 ? ((a0[9:8] == 2'd1) ? 3'd1 : (a0[9:8] == 2'd2) ? 3'd3 : 3'd0) : a0[5:3];
-      sb = as1 && m && a1[14];
-      if (!m)                    dp = 3'd0;
-      else if (!as1)            dp = {1'b0, a1[11:10]};
-      else if (a1[15] && a2[17]) dp = 3'd4;
-      else                       dp = (a1[13:12] == 2'd1) ? 3'd1 : (a1[13:12] == 2'd2) ? 3'd4 : 3'd0;
+      ob = thrd[p*8];                               // opcode bit 0 (group 3: ib / iz)
+      b1 = thrd[(p+1)*8 +: 8];
+      b2 = thrd[(p+2)*8 +: 8];
+      m  = pg1 ? a0[6] : a0[2];
+      ic = pg1 ? ((a0[8:7] == 2'd1) ? 3'd1 : (a0[8:7] == 2'd2) ? 3'd3 : 3'd0) : a0[5:3];
+      sb = as1 && m && a1[9];
+      if (!m)                   dp = 3'd0;
+      else if (b1[7:6] == 2'd1) dp = 3'd1;
+      else if (!as1)            dp = a1[10] ? 3'd2 : 3'd0;
+      else                      dp = (a1[11] || (b1[7:6] == 2'd0 && a1[9] && b2[2:0] == 3'd5))
+                                     ? 3'd4 : 3'd0;
       case (ic)
         3'd1: im = 3'd1;
         3'd2: im = 3'd2;
@@ -223,7 +232,7 @@ module tetrium_decode (
         3'd4: im = os1 ? 3'd6 : 3'd4;
         3'd5: im = as1 ? 3'd4 : 3'd2;
         3'd6: im = 3'd3;
-        3'd7: im = !a1[16] ? 3'd0 : !a0[6] ? 3'd1 : os1 ? 3'd4 : 3'd2;
+        3'd7: im = (b1[5:4] != 2'b00) ? 3'd0 : !ob ? 3'd1 : os1 ? 3'd4 : 3'd2;
         default: im = 3'd0;
       endcase
       lfp[p].praw  = a0[0] || a0[1];
@@ -240,7 +249,13 @@ module tetrium_decode (
   lf_t       lf;
   assign     lf      = lfp[eoff[3:0]];
   wire       l_pfx   = lf.pfx;
+`ifdef DEC_LTREE
+  // (Cyclone V: the length is only used for iend here; summed after the select, so the 16
+  //  per-position length adders and their select go away)
+  wire [3:0] len     = lf.ipos + {1'b0, lf.imm};
+`else
   wire [3:0] len     = lf.len;
+`endif
   // Selecting a per-length table entry by the length.  Cyclone V: the length is never
   // formed as a binary sum on the capture path (a 5-term add, ~4 LUT levels there); the
   // table is shifted by each term instead, len = 1 + modrm + sib + disp + imm
@@ -277,7 +292,6 @@ module tetrium_decode (
   logic        ir_v;
   logic [7:0]  wb [11];
   lf_t         ir_lf;
-  logic [PDW-1:0] pc0;           // predecode of the opcode byte
   logic        pg, os32, as32, i_sv, i_lock;
   logic [2:0]  i_s;
   logic [1:0]  i_rep;
@@ -431,7 +445,7 @@ module tetrium_decode (
       endcase
   end
   // group opcodes
-  wire        grp  = pg ? (pc0[27:24] == 4'd15) : pc0[23];
+  wire        grp  = pg ? (w0 == 8'h00 || w0 == 8'h01 || w0 == 8'hBA) : (w0[7:4] == 4'hF && w0[2:1] == 2'b11);
   wire [2:0]  gsel = pg ? ((w0 == 8'h00) ? 3'd4 : (w0 == 8'h01) ? 3'd5 : 3'd6) : {1'b0, w0[3], w0[0]};
   // dispatch index
   // (cs_d and pm change only through serializing instructions: a refetch follows)
@@ -443,9 +457,9 @@ module tetrium_decode (
   wire [ROM_AW+AF_BITS:0] pme = grp ? pm_ent_g({gsel, w1[5:3], mod3}) : pm_ent_n({pg, w0, mod3});
   wire              pmv   = pm && pme[ROM_AW+AF_BITS];
   wire [ROM_AW-1:0] didx  = iov ? ioe[ROM_AW+AF_BITS-1:AF_BITS] : pmv ? pme[ROM_AW+AF_BITS-1:AF_BITS] : ROM_AW'(didx0);
-  // first-uop A-fields from the stored opcode class (pc0)
+  // first-uop A-fields from the opcode class
   wire [AF_BITS-1:0] af1r = grp ? grp_af({gsel, w1[5:3], mod3}) :
-                            pg  ? class0f_af(pc0[27:24], mod3) : class_af(pc0[22:18], mod3);
+                            pg  ? class0f_af(opclass0f(w0), mod3) : class_af(opclass(w0), mod3);
   wire [AF_BITS-1:0] af1  = iov ? ioe[AF_BITS-1:0] : pmv ? pme[AF_BITS-1:0] : af1r;
 
 
@@ -616,6 +630,9 @@ module tetrium_decode (
   assign rom_en = inject || !hold_a || kill_a;
   tetrium_rom #(.AW(ROM_AW), .DW(UW_BITS), .FILE(`UCODE_FILE)) u_rom (
       .clk(clk), .re(rom_en), .addr(rom_addr), .q(a_uw));
+`ifdef UCOV
+  always_ff @(posedge clk) if (rom_en) a_upc <= rom_addr;
+`endif
 
   // bad prediction -> refetch at the current byte with prediction suppressed
   // (blocks relative to q[0]: cb + badblk)
@@ -631,6 +648,11 @@ module tetrium_decode (
   end
 
   // ------------------------------------------------------------ queue
+`ifdef SIM
+  always_ff @(posedge clk)
+    if (!rst && (cnt > 3'd4 || (pop && cnt == 3'd0) || (q_push && cnt == 3'd4 && !pop && !flush_front && !inject)))
+      $fatal(1, "decode: block queue count %0d (push %0d pop %0d)", cnt, q_push, pop);
+`endif
   wire [2:0] wpos = cnt - {2'd0, pop};
   always_ff @(posedge clk) begin
     if (rst || flush_front || inject) begin
@@ -860,11 +882,8 @@ module tetrium_decode (
     //  contents without ir_v are never used: A captures them qualified by ir_issue,
     //  pfx_ip_e only in the cycle after a capture)
     if (ir_den) begin
-      logic [16*PDW-1:0] two;
-      two = {qpd[1], qpd[0]};
       for (int k = 0; k < 11; k++) wb[k] <= fw[k];
       ir_lf      <= lf;
-      pc0        <= two[eoff[3:0] * PDW +: PDW];
       pg         <= pg1;
       os32       <= os1;
       as32       <= as1;

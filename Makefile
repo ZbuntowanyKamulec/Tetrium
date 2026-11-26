@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 ZbuntowanyKamulec
 # Tetrium build / test
-#   make ucode        regenerate the microcode ROM + package (ucode/ucgen.py)
+#   make ucode        regenerate the microcode ROM + package (ucode/ucgen.py; the program is
+#                     ucode/microcode.py, the uop format ucode/uarch.py)
+#   make ulist        microcode views: build/ucode.lst (ROM listing by address), build/ucode.uc
+#                     (table: one row per uop, by sequence)
+#   python3 ucode/ucgen.py --check   compare the generator's output with rtl/gen
 #   make sim          build the Verilator testbench (with the 86Box lockstep model)
 #   make test         run the SingleStepTests/80386 real-mode suite (tests/conv386.sh first)
 #   make test T="00 01 F6.6"   selected opcode files
 #   make lint
 #   BW=16/32/64/128   Wishbone data width (separate build directories)
+#   COV=1             RTL line / branch coverage build (build/simcov: tests/run.sh -c, tools/vcov.py)
 JOBS   ?= 16
 P       = tetrium
 R       = rtl
@@ -17,6 +22,10 @@ BWFLAGS = -DBUS_DW=$(BW) -CFLAGS -DBUS_DW=$(BW)
 else
 SIMD    = build/sim
 DBGD    = build/simdbg
+endif
+ifneq ($(COV),)
+SIMD    := $(subst build/sim,build/simcov,$(SIMD))
+COVFLAGS = --coverage-line
 endif
 VARP    = build/var_
 TLOG    = build/test.log
@@ -33,17 +42,23 @@ UCODE   = $(abspath $(R)/gen/ucode_rom.hex)
 # -fno-reorder: Verilator 5.020's statement reordering miscompiles the A-select
 # registers in decode (found by the 86Box lockstep).  -O0 and -fno-reorder are correct.
 VFLAGS  = --cc --exe --build -O3 -fno-reorder -j 8 -Wno-fatal -Wno-WIDTH -Wno-UNUSED -Wno-CASEINCOMPLETE \
-          -I$(R)/gen -I$(R) -DSIM '-DUCODE_FILE="$(UCODE)"' --top-module $(P)_core \
-          -CFLAGS -O2 --x-assign fast --x-initial fast $(XFLAGS) $(BWFLAGS)
+          -I$(R)/gen -I$(R) -DSIM -DUCOV -CFLAGS -DUCOV '-DUCODE_FILE="$(UCODE)"' --top-module $(P)_core \
+          -CFLAGS -O2 --x-assign fast --x-initial fast $(XFLAGS) $(BWFLAGS) $(COVFLAGS)
 BIN     = $(SIMD)/V$(P)_core
 T      ?=
 
-.PHONY: ucode sim simdbg simvar test lint clean
+.PHONY: ucode ulist sim simdbg simvar test lint clean
 
-$(R)/gen/ucode_rom.hex $(R)/gen/$(P)_pkg.sv: ucode/ucgen.py
+$(R)/gen/ucode_rom.hex $(R)/gen/$(P)_pkg.sv: $(wildcard ucode/*.py)
 	python3 ucode/ucgen.py
 
 ucode: $(R)/gen/ucode_rom.hex
+
+ulist: $(R)/gen/ucode_rom.hex
+	@mkdir -p build
+	python3 ucode/ucgen.py --list build/ucode.lst
+	python3 ucode/uctable.py --dump build/ucode.uc
+	python3 ucode/uctable.py --check build/ucode.uc
 
 $(BIN): $(RTL) $(HDRS) $(R)/gen/ucode_rom.hex $(TB) $(XREF)
 	@mkdir -p $(SIMD)

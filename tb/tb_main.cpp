@@ -29,9 +29,55 @@ static long tstart = 0, tlen = 0, tglob = 0;
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <map>
 #include <deque>
 #include <map>
+
+#if VM_COVERAGE
+// RTL line / branch coverage (make COV=1): with VCOV_DIR set, written at exit to
+// VCOV_DIR/<pid>.dat (tools/vcov.py merges and reports)
+#include "verilated_cov.h"
+#include <unistd.h>
+static bool vcov_done = false;
+static void vcov_dump() {
+    const char *d = getenv("VCOV_DIR");
+    if (vcov_done || !d) return;
+    vcov_done = true;
+    char fn[1024];
+    snprintf(fn, sizeof fn, "%s/%d.dat", d, (int)getpid());
+    Verilated::defaultContextp()->coveragep()->write(fn);
+}
+#endif
+
+#ifdef UCOV
+// microcode coverage: ROM addresses of the uops that completed in E (tetrium_core.sv uc_hit).
+// With UCOV_DIR set, written at exit to UCOV_DIR/<pid>.txt (tools/ucov.py merges and reports).
+#include <csignal>
+#include <unistd.h>
+static uint8_t ucov[1 << 12];
+extern "C" void uc_hit(int a) { ucov[a & 0xFFF] = 1; }
+static void ucov_dump() {
+    static bool done = false;
+    const char *d = getenv("UCOV_DIR");
+    if (done || !d) return;
+    done = true;
+    char fn[1024];
+    snprintf(fn, sizeof fn, "%s/%d.txt", d, (int)getpid());
+    FILE *f = fopen(fn, "w");
+    if (!f) return;
+    for (int a = 0; a < (1 << 12); a++) if (ucov[a]) fprintf(f, "%x\n", a);
+    fclose(f);
+}
+static void ucov_sig(int s) {
+    ucov_dump();
+#if VM_COVERAGE
+    vcov_dump();
+#endif
+    signal(s, SIG_DFL); raise(s);
+}
+#endif
+
 
 static const int gmap[8] = {0, 2, 3, 1, 8, 9, 10, 11};   // core order AX CX DX BX SP BP SI DI -> test idx
 
@@ -1023,9 +1069,10 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                     nmis++;
                 }
             }
-            // (with LOCKNMI an NMI wakes a HLT: done once halted for two NMI periods)
-            if (++idle > (S.nmi_per ? 2 * S.nmi_per : 2)) done = true;
-        } else if (S.nmi_per) { idle = 0; shut_done = false; }
+            // (with LOCKNMI an NMI wakes a HLT, with -i INTR (IF set): done once halted for two
+            //  NMI / INTR periods)
+            if (++idle > std::max(2L, 2 * std::max((long)S.nmi_per, (long)S.irq_per))) done = true;
+        } else if (S.nmi_per || S.irq_per) { idle = 0; shut_done = false; }
         if (rprog && ins >= (long)nret) done = true;
     }
     // final memory image (a random program is stopped mid-flight: its stores were compared above)
@@ -1089,6 +1136,13 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
 
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
+#ifdef UCOV
+    atexit(ucov_dump);                   // (also $fatal / exit paths)
+    signal(SIGTERM, ucov_sig); signal(SIGINT, ucov_sig);
+#endif
+#if VM_COVERAGE
+    atexit(vcov_dump);                   // (exit paths; the model is never freed before them)
+#endif
     std::vector<std::string> files;
     long irq = 0;
     int verbose = 0, maxn = 1 << 30, lat = 1, showf = 3, trace = 0, bmode = 0, check = 1, kmode = 0, rndbus = 0;
@@ -1142,6 +1196,9 @@ int main(int argc, char **argv) {
     if (!bmode && !kmode && files.size() > 1) printf("TOTAL %ld/%ld\n", tp, tt);
 #ifdef TRACE
     if (tfp) tfp->close();
+#endif
+#if VM_COVERAGE
+    vcov_dump();                         // (the counters live in the model: before delete)
 #endif
     delete S.top;
     return 0;

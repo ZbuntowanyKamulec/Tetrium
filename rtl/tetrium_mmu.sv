@@ -337,6 +337,20 @@ module tetrium_mmu (
   // (the entries are kept in the flat output vectors: unpacked arrays here crashed Quartus 17
   //  synthesis, SGN 'Cannot get member name')
   logic [2:0]  ulru [UNS];
+  // An entry's page lies in its set: linear[12 +: USB] is the set number.  So linear[14:12]
+  // (ut_lo) is a constant with USB >= 3, and tag bit linear[15] (entry bit 25) one with
+  // USB == 4: not stored (the registers ut_lo_q / that bit of ut_e_q are left unused)
+  logic [UN*42-1:0] ut_e_q;
+  logic [UN*3-1:0]  ut_lo_q;
+  genvar gq;
+  generate
+  for (gq = 0; gq < UN; gq = gq + 1) begin : g_ute
+    localparam logic [3:0] ST = 4'(gq / UWY);
+    assign ut_lo[gq * 3 +: 3] = (USB >= 3) ? ST[2:0] : ut_lo_q[gq * 3 +: 3];
+    assign ut_e[gq * 42 +: 42] = {ut_e_q[gq * 42 + 26 +: 16], (USB == 4) ? ST[3] : ut_e_q[gq * 42 + 25],
+                                  ut_e_q[gq * 42 +: 25]};
+  end
+  endgenerate
   function automatic int uset(input logic [31:12] a); return (USB == 0) ? 0 : (int'(a[15:12]) & (UNS - 1)); endfunction
   function automatic logic [1:0] uvict(input logic [2:0] b);
     return (UWY == 1) ? 2'd0 : (UWY == 2) ? {1'b0, b[0]} : (b[0] ? {1'b1, b[2]} : {1'b0, b[1]});
@@ -380,13 +394,43 @@ module tetrium_mmu (
         if (ld_q && ld_sel[q] && !(tlb_we && tlb_ws == ld_vpn[14:12] && tlb_ww == ld_way)) ut_v[q] <= 1'b1;
     end
     for (int q = 0; q < UN; q++)
-      if (ld_q && ld_sel[q]) begin ut_e[q * 42 +: 42] <= ld_e; ut_lo[q * 3 +: 3] <= ld_vpn[14:12]; ut_w[q * 2 +: 2] <= ld_way; end
+      if (ld_q && ld_sel[q]) begin ut_e_q[q * 42 +: 42] <= ld_e; ut_lo_q[q * 3 +: 3] <= ld_vpn[14:12]; ut_w[q * 2 +: 2] <= ld_way; end
     for (int t = 0; t < 2; t++)
       if (ut_tv[t]) ulru[int'(ut_tsw[t*4 +: 4]) / UWY] <= utouch(ulru[int'(ut_tsw[t*4 +: 4]) / UWY], 2'(int'(ut_tsw[t*4 +: 4]) % UWY));
     if (ld_q) ulru[ld_s] <= utouch(ulru[ld_s], ld_w);
   end
 
 `ifdef SIM
+  // ---------------------------------------------------------------- checks (simulation)
+  // a copy of the TLB entries (written with the RAMs): a walker fill never duplicates a
+  // valid entry of the same page in another way (TR6 writes may, as on the i486); INVLPG
+  // leaves no valid entry of the page; every valid data micro-TLB entry is a copy of a
+  // valid TLB entry (set, way) as it is now, with A20M# applied (am: the micro-TLBs hold
+  // masked pages; not checked in the cycles between an A20M# change and their flush)
+  logic [41:0] c_e [8][4];
+  logic        c_inv;
+  logic [31:12] c_ia;
+  always @(posedge clk) begin
+    if (!rst && tlb_we && tlb_wv && !tr_we)
+      for (int i = 0; i < 4; i++)
+        if (i != int'(tlb_ww) && tv[tlb_ws][i] && etag(c_e[tlb_ws][i]) == etag(tlb_wd) &&
+            !(invlpg_v && invlpg_a[14:12] == tlb_ws))
+          $fatal(1, "mmu: TLB fill of page %05x into way %0d: way %0d of set %0d holds it already",
+                 {etag(tlb_wd), tlb_ws}, tlb_ww, i, tlb_ws);
+    if (!rst && c_inv)
+      for (int i = 0; i < 4; i++)
+        if (tv[c_ia[14:12]][i] && etag(c_e[c_ia[14:12]][i]) == c_ia[31:15])
+          $fatal(1, "mmu: INVLPG %05x left way %0d valid", c_ia, i);
+    if (!rst && !(a20m != a20_q || a20_c))
+      for (int q = 0; q < UN; q++)
+        if (ut_v[q] && !(tv[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]] && am(c_e[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]]) == ut_e[q * 42 +: 42]))
+          $fatal(1, "mmu: data micro-TLB entry %0d (page %05x) is not a copy of a valid TLB entry (set %0d way %0d: valid %0d, %011x; copy %011x)",
+                 q, {etag(ut_e[q * 42 +: 42]), ut_lo[q * 3 +: 3]}, ut_lo[q * 3 +: 3], ut_w[q * 2 +: 2],
+                 tv[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]], c_e[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]], ut_e[q * 42 +: 42]);
+    if (tlb_we) c_e[tlb_ws][tlb_ww] <= tlb_wd;
+    c_inv <= !rst && invlpg_v && !flush_all;
+    c_ia  <= invlpg_a;
+  end
   logic ptr;
   initial ptr = $test$plusargs("ptrace");
   always_ff @(posedge clk) if (ptr) begin

@@ -43,7 +43,7 @@ module tetrium_fetch #(
     input  logic        q_full,
     output logic        q_push,
     output logic [63:0] q_data,
-    output logic [223:0] q_pd,         // per-byte predecode (tetrium_pdec.svh, 28 bits / byte)
+    output logic [95:0] q_pd,         // per-byte predecode (tetrium_pdec.svh, 12 bits / byte)
     output logic [2:0]  q_s,
     output logic [2:0]  q_e,
     output logic        q_pt,
@@ -73,6 +73,7 @@ module tetrium_fetch #(
     input  logic        snp_v,
     input  logic [31:4] snp_line,
     input  logic        wsn_v,         // a store is accepted from W this cycle
+    input  logic        w_occ,         // W holds a store
     input  logic [31:3] wsn_l0,        // 8-byte blocks of its bytes
     input  logic [31:3] wsn_l1,
     input  logic        est_v,         // the uop in E stores to blocks est_l0 / est_l1
@@ -113,7 +114,6 @@ module tetrium_fetch #(
     output logic [31:0] cs_o
 );
   genvar w, h;
-`include "ucode_class.svh"
 `include "tetrium_pdec.svh"
   // ---------------------------------------------------------------- state
   typedef enum logic [2:0] {S_INIT, S_RUN, S_FILL, S_FILLTAG, S_RETRY, S_XL, S_FW, S_FAULT} st_t;
@@ -162,13 +162,20 @@ module tetrium_fetch #(
   wire [31:12]  lpf_ppn = fu_r[21:2];
   wire          lpf_u   = fu_r[1];
   wire          lpf_pcd = fu_r[0];
-  wire [1:0]    lpf_way = fu_way[fu_i];
+  // one-hot AND-OR read: fu_way is also read whole (registers); an indexed read with a
+  // registered index makes Quartus add a RAM copy of the array (an M10K for 32 bits)
+  logic [1:0]   lpf_way;
+  always_comb begin
+    lpf_way = '0;
+    for (int fi = 0; fi < FUN; fi++) lpf_way |= fu_way[fi] & {2{fu_i == FSB'(fi)}};
+  end
   wire         lp_ok = !pg || (lpf_v && (f_lin[31:12] == lpf_vpn) && (lpf_u || !cpl3));
   wire [31:12] fppn  = pg ? lpf_ppn : f_lin[31:12];
   wire [31:0]  f_phy = {fppn, f_lin[11:0]};
 
   // ---------------------------------------------------------------- tags
-  // per way: the tag; read ports: external snoop, store lines (E).  The fetch port is
+  // per way: the tag; read ports: external snoop, store line (E; the second line of a store
+  // that spans two lines is looked up in W, which holds one cycle for it).  The fetch port is
   // the pair of half RAMs below, which also hold the line's valid bit; the other ports
   // take validity from the sub-block valid bits (a valid sub-block implies a valid
   // line).  Invalidated tags are written all ones (a snoop of FFFFF000-FFFFFFFF may
@@ -177,13 +184,14 @@ module tetrium_fetch #(
   logic [INW-1:0]   tag_we;
   logic [ISETB-1:0] tag_waddr;
   logic [ITE-1:0]   tag_wdata;             // {valid, tag}
-  logic [3*ITAGB-1:0] tag_rd [INW];
+  logic [2*ITAGB-1:0] tag_rd [INW];
+  logic [31:3]      lk_a;                  // store block looked up: E's first, or W's second line
   logic [2*ITE-1:0] tag_fh [INW];          // fetch port: both set-parity halves
   generate
   for (w = 0; w < INW; w = w + 1) begin : g_itag
-    tetrium_lutram #(.AW(ISETB), .DW(ITAGB), .NR(3)) u_tag (
+    tetrium_lutram #(.AW(ISETB), .DW(ITAGB), .NR(2)) u_tag (
         .clk(clk), .clr(rst), .we(tag_we[w]), .waddr(tag_waddr), .wdata(tag_wdata[ITAGB-1:0]),
-        .raddr({est_l1[IWB-1:LB], est_l0[IWB-1:LB], snp_line[IWB-1:LB]}),
+        .raddr({lk_a[IWB-1:LB], snp_line[IWB-1:LB]}),
         .rdata(tag_rd[w]));
     // fetch hit path: the two halves (by the set's low bit) are read and
     // compared separately and the result is selected (no RAM output mux
@@ -206,19 +214,21 @@ module tetrium_fetch #(
   // sub-block: data next to code in the same line costs one invalidation, not one per
   // store.  A sub-block is valid only in a valid line (fills set, invalidations clear
   // all of a way's bits).  One RAM for all ways, written read-modify-write through a
-  // port at the write address.  Ports: fetch, store blocks (E), write address.
+  // port at the write address.  Ports: fetch, store line (lk_a), write address.
   localparam int SBW = INW * NSB;
-  logic [SBW-1:0]   sbv_f, sbv_e0, sbv_e1, sbv_cur, sbv_wd;
+  logic [SBW-1:0]   sbv_f, sbv_e0, sbv_cur, sbv_wd;
   logic             sbv_we;
   logic [ISETB-1:0] sbv_wa;
-  tetrium_lutram #(.AW(ISETB), .DW(SBW), .NR(4)) u_sbv (
+  tetrium_lutram #(.AW(ISETB), .DW(SBW), .NR(3)) u_sbv (
       .clk(clk), .clr(rst), .we(sbv_we), .waddr(sbv_wa), .wdata(sbv_wd),
-      .raddr({sbv_wa, est_l1[IWB-1:LB], est_l0[IWB-1:LB], f_lin[IWB-1:LB]}),
-      .rdata({sbv_cur, sbv_e1, sbv_e0, sbv_f}));
+      .raddr({sbv_wa, lk_a[IWB-1:LB], f_lin[IWB-1:LB]}),
+      .rdata({sbv_cur, sbv_e0, sbv_f}));
   function automatic logic [SBB-1:0] sbi(input logic [31:3] a);
     return (NSB > 1) ? SBB'(a[LB-1:3]) : '0;
   endfunction
   logic [INW-1:0] hvf, hw0, hw1;
+  // (the store's second block in the same line: the same tag and valid word)
+  wire            est_x = est_l1[31:LB] != est_l0[31:LB];   // the store's bytes span two lines
   logic [INW-1:0] tmf;                            // fetch tag match (any sub-block)
   wire  [INW-1:0] hvs = ihv(0, snp_line);         // external snoop (whole line)
   always_comb begin
@@ -230,11 +240,11 @@ module tetrium_fetch #(
       t0[w] = f_lin[LB] ? c1 : c0;
     end
     tmf = t0;
-    t1 = ihv(1, est_l0[31:4]); t2 = ihv(2, est_l1[31:4]);
+    t1 = ihv(1, lk_a[31:4]);
     for (int w = 0; w < INW; w++) begin
       hvf[w] = t0[w] && sbv_f[w*NSB + sbi(f_lin[31:3])];
-      hw0[w] = t1[w] && sbv_e0[w*NSB + sbi(est_l0)];
-      hw1[w] = t2[w] && sbv_e1[w*NSB + sbi(est_l1)];
+      hw0[w] = t1[w] && sbv_e0[w*NSB + sbi(lk_a)];
+      hw1[w] = t1[w] && sbv_e0[w*NSB + sbi(est_l1)] && !est_x;
     end
   end
   logic [INW-1:0] vf;                             // valid ways of f_lin's set
@@ -441,7 +451,18 @@ module tetrium_fetch #(
   wire          rs_e   = (rsx == 2'd0);
   // (an E redirect restores from the committed stack: snapshots of A / D only)
   wire [RSB-1:0] rr_rsp = rs_e ? crsp : rsx[1] ? rs_rsp[2] : rs_rsp[1];
-  wire [31:0]   rr_top = rs_e ? cras[crsp] : rsx[1] ? rs_top[2] : rs_top[1];
+  // cras[crsp] and cras[crsp - 1] as one-hot AND-OR reads: the array is also read whole
+  // (registers); an indexed read makes Quartus add an M10K copy of it
+  wire [RSB-1:0] crsp_m1 = crsp - 1'b1;
+  logic [31:0]  cr_top, cr_dn;
+  always_comb begin
+    cr_top = '0; cr_dn = '0;
+    for (int ci = 0; ci < RSD; ci++) begin
+      cr_top |= cras[ci] & {32{crsp == RSB'(ci)}};
+      cr_dn  |= cras[ci] & {32{crsp_m1 == RSB'(ci)}};
+    end
+  end
+  wire [31:0]   rr_top = rs_e ? cr_top : rsx[1] ? rs_top[2] : rs_top[1];
   // history seen by the lookup issued this cycle (leaving out the predecessor's bit)
   logic [GHW-2:0] hview;
   always_comb begin
@@ -620,7 +641,7 @@ module tetrium_fetch #(
   // uop's block (snapshot), then that uop's own CALL / RET is applied.  Only an E
   // redirect pops (A redirects push, D redirects neither: tetrium_core), so the entry
   // below the restored top comes from the committed stack alone.
-  wire  [31:0] rb_dnv = cras[crsp - 1'b1];
+  wire  [31:0] rb_dnv = cr_dn;
 `ifdef SIM
   always_ff @(posedge clk)
     if (!rst && redir_v && redir_rpop && !redir_rpush && !rs_e) $error("return stack pop on an A / D redirect");
@@ -664,6 +685,9 @@ module tetrium_fetch #(
     end else if (rw_v) ras[rw_a] <= rw_d;
   end
   wire [31:0] redir_lin = a20(redir_csb + redir_ip);
+  // block IP of a redirect / predicted target: one subtractor, its inputs selected by the
+  // registered redirect (the 2:1 select fits the adder's input LUTs)
+  wire [31:0] bip_rt = (redir_v ? redir_ip : tk_ip) - {29'd0, redir_v ? redir_lin[2:0] : tk_lin[2:0]};
 
   // The BRAM always reads the next sequential block when the current data is
   // valid; if that block is not consumed (miss / queue full) dv drops and the
@@ -722,9 +746,16 @@ module tetrium_fetch #(
   logic [ITAGB-1:0] fill_tag;
   // the store's lines are looked up while it is in E (registered with the W
   // address registers, same enable), and used when W hands it to the buffer
+  // A store whose bytes span two lines (eh_x) holds W for one cycle, in which the port looks up
+  // its second line (no store moves into W meanwhile, the one in E repeats its lookup)
   logic [INW-1:0] eh0_q, eh1_q;
+  logic           eh_x;
+  wire            lk_w = eh_x && w_occ;
+  assign lk_a = lk_w ? wsn_l1 : est_l0;
   always_ff @(posedge clk)
-    if (!hold_w) begin eh0_q <= hw0; eh1_q <= hw1; end
+    if (rst) eh_x <= 1'b0;
+    else if (!hold_w) begin eh0_q <= hw0; eh1_q <= hw1; eh_x <= est_v && est_x; end
+    else if (lk_w) begin eh1_q <= hw0; eh_x <= 1'b0; end
   wire  ws_h0 = wsn_v && |eh0_q;
   wire  ws_h1 = wsn_v && (wsn_l1 != wsn_l0) && |eh1_q;
   // a fill must not become valid if a store to its line is in E or W (the
@@ -752,7 +783,16 @@ module tetrium_fetch #(
   assign snp_hit  = inv_pend;
   // smc_hold = (wq_n != 0) || sh0_v || sh1_v, registered from their next values (W hold path)
   logic smc_hold_q;
-  assign smc_hold = smc_hold_q;
+  assign smc_hold = smc_hold_q || eh_x;
+`ifdef SIM
+  // (statistics: stores accepted from W, and those that spanned two lines: one W cycle each)
+  longint st_n = 0, st_x = 0;
+  always_ff @(posedge clk) begin
+    if (wsn_v) st_n <= st_n + 1;
+    if (lk_w) st_x <= st_x + 1;
+  end
+  final if (st_n != 0) $display("fetch: %0d stores, %0d spanning two lines (one W cycle each)", st_n, st_x);
+`endif
   always_ff @(posedge clk) begin
     if (rst) begin
       inv_pend <= 1'b0;
@@ -978,13 +1018,13 @@ module tetrium_fetch #(
       end
       if (redir_v) begin
         f_valid  <= 1'b1;
-        f_bip    <= redir_ip - {29'd0, redir_lin[2:0]};
+        f_bip    <= bip_rt;
         f_cs     <= redir_csb;
         f_nopred <= redir_nopred;
       end else if (stop) begin
         f_valid  <= 1'b0;
       end else if (tk) begin
-        f_bip    <= tk_ip - {29'd0, tk_lin[2:0]};
+        f_bip    <= bip_rt;
         if (tk_far && tk_fcs) f_cs <= {12'h0, tk_ip[31:16], 4'h0};
       end else if (q_push) begin
         f_nopred <= 1'b0;

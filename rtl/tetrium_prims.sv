@@ -45,15 +45,28 @@ module tetrium_bram_be #(
     input  logic [AW-1:0]   waddr,
     input  logic [8*NB-1:0] wdata
 );
+  // Quartus 17 infers byte enables only from packed byte lanes with one write statement
+  // per lane (a write loop splits the array into one 8-bit RAM per byte: 512 x 32 took
+  // 4 M10K instead of 2); Vivado does not infer a RAM from that form (all registers) and
+  // takes its byte-write template, a loop over part-selects of a plain vector
+  initial assert (NB == 4) else $error("tetrium_bram_be: NB must be 4");
 `ifdef ALTERA
-  (* ramstyle = "M10K, no_rw_check" *) logic [8*NB-1:0] mem [0:(1<<AW)-1];
-`else
-  (* ram_style = "block" *) logic [8*NB-1:0] mem [0:(1<<AW)-1];
-`endif
+  (* ramstyle = "M10K, no_rw_check" *) logic [3:0][7:0] mem [0:(1<<AW)-1];
   always_ff @(posedge clk) begin
-    for (int b = 0; b < NB; b++) if (we[b]) mem[waddr][b*8 +: 8] <= wdata[b*8 +: 8];
+    if (we[0]) mem[waddr][0] <= wdata[7:0];
+    if (we[1]) mem[waddr][1] <= wdata[15:8];
+    if (we[2]) mem[waddr][2] <= wdata[23:16];
+    if (we[3]) mem[waddr][3] <= wdata[31:24];
     if (re) rdata <= mem[raddr];
   end
+`else
+  (* ram_style = "block" *) logic [8*NB-1:0] mem [0:(1<<AW)-1];
+  always_ff @(posedge clk) begin
+    for (int i = 0; i < NB; i++)
+      if (we[i]) mem[waddr][i*8 +: 8] <= wdata[i*8 +: 8];
+    if (re) rdata <= mem[raddr];
+  end
+`endif
 endmodule
 
 // Synchronous ROM with read enable, initialised from a hex file.

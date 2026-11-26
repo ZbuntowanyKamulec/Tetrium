@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 ZbuntowanyKamulec
 // Per-byte predecode shared by fetch (computed at I-cache fill, stored with the
-// line) and decode.  Needs ucode_class.svh.
+// line) and decode.
 //
 // The stored bits do not depend on the processor mode: every byte is described
 // in each role it can play, and decode selects with the operand / address size.
@@ -11,28 +11,24 @@
 //     [2]     modrm   a modrm byte follows
 //     [5:3]   immc    0 none, 1 ib, 2 iw, 3 iz (2/4 by operand size), 4 far pointer (iz + 2),
 //                     5 moffs (2/4 by address size), 6 ENTER (iw + ib),
-//                     7 group 3 (immediate iff modrm.reg < 2: ib or iz by [6])
-//     [6]     opw     opcode bit 0
+//                     7 group 3 (immediate iff modrm.reg < 2: ib or iz by opcode bit 0)
 //   as the second byte of a 0F opcode
-//     [7]     modrm
-//     [9:8]   immc    0 none, 1 ib, 2 iz
+//     [6]     modrm
+//     [8:7]   immc    0 none, 1 ib, 2 iz
 //   as a modrm byte
-//     [11:10] md16    displacement bytes with 16-bit addressing (0, 1, 2)
-//     [14:12] md32    32-bit addressing: {SIB follows, displacement 0: none, 1: 1 byte, 2: 4 bytes}
-//     [15]    sibx    mod = 0 and rm = 4: 4 more displacement bytes if the SIB base is 5
-//     [16]    reg01   reg field < 2
-//   as a SIB byte
-//     [17]    base5   base field = 5
-//   first-uop A-stage field class
-//     [22:18] one-byte opcode class,  [23] group opcode (F6 F7 FE FF)
-//     [27:24] 0F-page class (15: group opcode 0F00 0F01 0FBA)
-localparam int PDW = 28;
+//     [9]     sib     32-bit addressing: a SIB byte follows (mod != 3 and rm = 4)
+//     [10]    d16w    16-bit addressing: 2 bytes (mod = 2, or mod = 0 and rm = 6)
+//     [11]    d32w    32-bit addressing: 4 bytes (mod = 2, or mod = 0 and rm = 5)
+// Not stored, decode takes them from the code bytes: the opcode's bit 0 (group 3: ib or iz),
+// mod = 1 (1-byte displacement), mod = 0 with SIB base 5, group 3 reg < 2, and the
+// opcode class for the first uop's A-fields (looked up after the IR register).
+// 12 bits: 4 bytes + 4 x 12 = 80 bits per half row, 4 M10K (512 x 20).
+localparam int PDW = 12;
 
   function automatic logic [PDW-1:0] pdec(input logic [7:0] b);
-    logic       pfx, esc, m1, m0f, sib, sibx;
+    logic       pfx, esc, m1, m0f;
     logic [2:0] ic;
-    logic [1:0] i0f, md16, d32;
-    logic [3:0] c0f;
+    logic [1:0] i0f;
     pfx = 1'b0; esc = (b == 8'h0F); m1 = 1'b0; ic = 3'd0; m0f = 1'b0; i0f = 2'd0;
     // ---- one-byte opcodes
     casez (b)
@@ -91,22 +87,7 @@ localparam int PDW = 28;
       8'hC0, 8'hC1: m0f = 1'b1;
       default: ;
     endcase
-    // ---- as a modrm byte
-    case (b[7:6])
-      2'd0: md16 = (b[2:0] == 3'd6) ? 2'd2 : 2'd0;
-      2'd1: md16 = 2'd1;
-      2'd2: md16 = 2'd2;
-      default: md16 = 2'd0;
-    endcase
-    sib  = (b[7:6] != 2'd3) && (b[2:0] == 3'd4);
-    sibx = (b[7:6] == 2'd0) && (b[2:0] == 3'd4);
-    case (b[7:6])
-      2'd0: d32 = (b[2:0] == 3'd5) ? 2'd2 : 2'd0;
-      2'd1: d32 = 2'd1;
-      2'd2: d32 = 2'd2;
-      default: d32 = 2'd0;
-    endcase
-    c0f = ((b == 8'h00) || (b == 8'h01) || (b == 8'hBA)) ? 4'd15 : opclass0f(b);
-    return {c0f, (b[7:4] == 4'hF) && (b[2:1] == 2'b11), opclass(b),
-            b[2:0] == 3'd5, b[5:4] == 2'b00, sibx, sib, d32, md16, i0f, m0f, b[0], ic, m1, esc, pfx};
+    return {(b[7:6] == 2'd2) || (b[7:6] == 2'd0 && b[2:0] == 3'd5),
+            (b[7:6] == 2'd2) || (b[7:6] == 2'd0 && b[2:0] == 3'd6),
+            (b[7:6] != 2'd3) && (b[2:0] == 3'd4), i0f, m0f, ic, m1, esc, pfx};
   endfunction

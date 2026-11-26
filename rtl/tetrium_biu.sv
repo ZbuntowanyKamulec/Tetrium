@@ -153,6 +153,32 @@ module tetrium_biu #(
   end
   wire issue = wb_stb && !wb_stall;
   wire ack   = busy && wb_ack;
+`ifdef SIM
+  // ---------------------------------------------------------------- checks (simulation)
+  // pipelined Wishbone B4: a stalled request is held unchanged; an ack answers an
+  // accepted request; CYC stays asserted until every accepted request is acked
+  logic        c_stl;
+  logic [31:0] c_adr;
+  logic [BUS_DW/8-1:0] c_sel;
+  logic [BUS_DW-1:0]   c_dat;
+  logic        c_we;
+  logic [1:0]  c_tga;
+  int          c_out;
+  always @(posedge clk) begin
+    if (rst) begin c_stl <= 1'b0; c_out = 0; end
+    else begin
+      if (wb_stb && !wb_cyc) $fatal(1, "biu: STB without CYC");
+      if (c_stl && !(wb_stb && 32'(wb_adr) == c_adr && wb_sel == c_sel && wb_we == c_we && wb_tga == c_tga &&
+                     (!wb_we || wb_dato == c_dat)))
+        $fatal(1, "biu: stalled request changed or dropped (adr %08x -> %08x)", c_adr, 32'(wb_adr));
+      if (wb_ack && c_out == 0) $fatal(1, "biu: ACK with no request outstanding");
+      c_out = c_out + (issue ? 1 : 0) - (wb_ack ? 1 : 0);
+      if (!wb_cyc && c_out != 0) $fatal(1, "biu: CYC dropped with %0d requests unacked", c_out);
+      c_stl <= wb_stb && wb_stall;
+      c_adr <= 32'(wb_adr); c_sel <= wb_sel; c_dat <= wb_dato; c_we <= wb_we; c_tga <= wb_tga;
+    end
+  end
+`endif
   wire lastack = !ws && ack && (na + 5'd1 == nb);
 
   // stream: load the next entry when the request register is free (or being accepted)

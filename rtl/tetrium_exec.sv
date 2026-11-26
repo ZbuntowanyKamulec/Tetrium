@@ -76,6 +76,7 @@ module tetrium_exec #(
     input  logic [31:2] m_lin4,
     input  logic [31:0] m_slin,
     input  logic [31:2] m_slin4,
+    input  logic [3:0]  m_l20,          // bit 20 of those before the A20 gate {slin4, slin, lin4, lin}
     // paging: physical pages of the primary / secondary access from the data micro-TLB
     // (A2; a miss replayed in M through the TLB) and whether M found them usable (hit,
     // rights, D for a write)
@@ -139,6 +140,7 @@ module tetrium_exec #(
     input  logic        c_busy,         // a cache sweep is pending or running
     input  logic        smc_hit,        // a store hit a valid I-cache line
     input  logic        snp_hit,        // an external snoop hit a valid I-cache line
+    input  logic        a20_chg,        // A20M# changed this cycle (OUT 92h): refetch as for SMC
     output logic        e_busy_valid,   // E holds a valid uop
     output logic [15:0] e_dmask,
     output logic        ce_push,      // committed near CALL (return address ce_rip) / RET
@@ -381,11 +383,15 @@ module tetrium_exec #(
   // system registers (CR0 ET reads as 1)
   logic [31:0] cr0, cr2, cr3, gdtb, idtb;
   logic [31:0] dr [4];         // debug registers DR0-3 (linear breakpoint addresses)
-  logic [31:2] drm1 [4];       // DRi word address - 1 (a breakpoint in the next word of an access)
   logic [31:0] dr7;
   logic [3:0]  dr6_b, dr6_h;   // DR6 [3:0] (B0-3), [15:12] (BT BS BD, bit 12); the rest reads 1
   wire  [31:0] dr6 = {16'hFFFF, dr6_h, 8'hFF, dr6_b};
-  logic [31:0] tr345 [4];      // TR3, TR4, TR5 (index modrm.reg[1:0]; cache test registers: storage only)
+  // cache test registers (i486 manual 10.5, as 86Box): TR4 (tag / valid / LRU) and TR5 (control:
+  // CTL [1:0], ENT [3:2], SET [10:4]) hold what is written; TR3 writes go to the cache fill
+  // buffer and TR3 reads come from the cache read buffer (doubleword TR5.ENT), which only a TR5
+  // cache read (CTL = 2) loads.  The test-cache array behind TR5's cache write / read / flush is
+  // not modelled (no block RAM for it), so the read buffer keeps its reset value: TR3 reads 0.
+  logic [31:0] tr4, tr5;
   logic [15:0] gdtl, idtl;
   // LDTR, TR: selector, base, limit (TR: TSS type, busy)
   logic [15:0] ldt_sel, tr_sel;
@@ -495,6 +501,7 @@ module tetrium_exec #(
       S_T9:   if (!pa) d.pv = tx[5];
       S_SSR:  if (!pa) d.pv = {16'h0, s[2]};
       S_TRS:  if (!pa) d.pv = {16'h0, tr_sel};
+      S_GPSZ: if (!pa) d.pv = {25'h0, gcnt, 2'b00} >> !m_os32;    // (count * 4 / 2)
       default: ;
     endcase
     if (d.k == 3'd1) begin
@@ -648,7 +655,7 @@ module tetrium_exec #(
       E_JNEAR, E_JFAR, E_LDCS: n_rsel = 10'b00_0010_0000;
       E_PUSHF, E_INTFL: n_rsel = 10'b00_0100_0000;
       E_MUL, E_DIV, E_AAM, E_AAD, E_DAA, E_DAS, E_AAA, E_AAS, E_CBW, E_CWD, E_SALC, E_LAHF, E_IN,
-      E_MOVX, E_BSWAP, E_IMUL2, E_BT, E_BTADR, E_BSF, E_SRD, E_DHI, E_EFL, E_GATE, E_TSSOFF, E_OLDSP, E_PADDR,
+      E_MOVX, E_BSWAP, E_IMUL2, E_BT, E_BTADR, E_BSF, E_SRD, E_DHI, E_EFL, E_GATE, E_TSSOFF, E_OLDSP, E_SSB,
       E_LDSP, E_IOMAP, E_LARV, E_ARPL, E_TSSDESC, E_TFLG, E_TLDW, E_LDTSK, E_TRD, E_CPUID:
         n_rsel = 10'b01_0000_0000;
       E_SETCC, E_CSEL: n_rsel = 10'b10_0000_0000;
@@ -676,10 +683,18 @@ module tetrium_exec #(
       db_en[i] = |dr7[2*i +: 2];
       ib_en[i] = db_en[i] && (dr7[16 + 4*i +: 2] == 2'b00);
     end
-  wire  [31:0] m_ilin = m_ip_start + cs_base;
+  // (M empty: the architectural EIP, for the breakpoint check of a fetch that faults, see ffbm)
+  wire  [31:0] m_ilin = (m_valid ? m_ip_start : ip_arch) + cs_base;
   wire        n_rd   = m_uw[UW_MRD_L] && !m_noacc;
   wire        n_wr   = (m_wr != WR_NONE) && !m_cmp;
   wire  [31:0] m_stl = (m_wr == WR_SEC) ? m_slin : m_lin;
+  // word addresses of the load / store and of their next word, as linear addresses (bit 20
+  // before the A20 gate: the 486 compares DRn with the linear address)
+  wire        m_sec  = (m_wr == WR_SEC);
+  wire [31:2] dl_w0  = {m_lin[31:21], m_l20[0], m_lin[19:2]};
+  wire [31:2] dl_w1  = {m_lin4[31:21], m_l20[1], m_lin4[19:2]};
+  wire [31:2] ds_w0  = m_sec ? {m_slin[31:21], m_l20[2], m_slin[19:2]} : dl_w0;
+  wire [31:2] ds_w1  = m_sec ? {m_slin4[31:21], m_l20[3], m_slin4[19:2]} : dl_w1;
   wire  [UW_CK_W-1:0] m_ck = m_uw[UW_CK_L +: UW_CK_W];
   wire        n_stsup = (m_eop == E_PROBE) ||
                         ((m_eop == E_DHI) && (m_ck == UW_CK_W'(CK_TBSY)) && (tsk_op == 2'd3)) ||
@@ -698,9 +713,9 @@ module tetrium_exec #(
         bk_bp[b] = ((2'(b) ^ dr[i][1:0]) & ~dr7[18 + 4*i +: 2]) == 2'b00;
       n_ibm[i] = (m_ilin == dr[i]);
       n_dbr[i] = n_rd && (dr7[16 + 4*i +: 2] == 2'b11) &&
-                 (((m_lin[31:2] == dr[i][31:2]) && |(bk_ld[3:0] & bk_bp)) || ((m_lin[31:2] == drm1[i]) && |(bk_ld[7:4] & bk_bp)));
+                 (((dl_w0 == dr[i][31:2]) && |(bk_ld[3:0] & bk_bp)) || ((dl_w1 == dr[i][31:2]) && |(bk_ld[7:4] & bk_bp)));
       n_dbw[i] = n_wr && dr7[16 + 4*i] &&
-                 (((m_stl[31:2] == dr[i][31:2]) && |(bk_st[3:0] & bk_bp)) || ((m_stl[31:2] == drm1[i]) && |(bk_st[7:4] & bk_bp)));
+                 (((ds_w0 == dr[i][31:2]) && |(bk_st[3:0] & bk_bp)) || ((ds_w1 == dr[i][31:2]) && |(bk_st[7:4] & bk_bp)));
     end
   end
   // ---------------------------------------------------------------- E input register
@@ -787,13 +802,10 @@ module tetrium_exec #(
   wire        ff_take = ff_go && !v && !flush_r && !halted && (xs == X_IDLE) && &e_idle;
   // an instruction breakpoint on an instruction whose fetch faults: #DB first (a code
   // breakpoint ranks above the faults of fetching the instruction); the architectural
-  // EIP's linear address against DR0-3, registered (only used once E has drained)
-  logic [31:0] ilin_a;
+  // EIP's linear address against DR0-3, registered (only used once the pipeline has drained:
+  // M is empty then, and the M-stage compare (n_ibm) takes the architectural EIP)
   logic [3:0]  ffbm;
-  always_ff @(posedge clk) begin
-    ilin_a <= cs_base + ip_arch;
-    for (int i = 0; i < 4; i++) ffbm[i] <= (ilin_a == dr[i]) && ib_en[i];
-  end
+  always_ff @(posedge clk) ffbm <= n_ibm & ib_en;
   wire ffbp     = |ffbm && !rf && !ssp_q;
   wire ff_db    = ff_take && ffbp;
   // crossing into the next page: load (size msz) / store (size sz)
@@ -1304,7 +1316,7 @@ module tetrium_exec #(
       E_BSF:   x0 = bs_zero ? A : {27'd0, bs_idx};
       E_BSWAP: x0 = {A[7:0], A[15:8], A[23:16], A[31:24]};
       // protected-mode result uops (two-cycle class): computed in the first cycle
-      E_DHI, E_EFL, E_GATE, E_TSSOFF, E_OLDSP, E_PADDR, E_LDSP, E_IOMAP, E_LARV, E_ARPL, E_TSSDESC, E_TFLG, E_TLDW,
+      E_DHI, E_EFL, E_GATE, E_TSSOFF, E_OLDSP, E_SSB, E_LDSP, E_IOMAP, E_LARV, E_ARPL, E_TSSDESC, E_TFLG, E_TLDW,
       E_LDTSK: x0 = x0p;
       E_SRD, E_TRD, E_CPUID: x0 = srd_q;      // (registered in the uop's first cycle)
       default: x0 = io_rd_r;             // IN
@@ -1329,7 +1341,8 @@ module tetrium_exec #(
           default: srd_n = (modrm[5:3] == 3'd2) ? cr2 : (modrm[5:3] == 3'd3) ? cr3 : (cr0 | 32'h10);
         endcase
       E_TRD:   srd_n = !op[2] ? (!modrm[5] ? dr[modrm[4:3]] : modrm[3] ? dr7 : dr6) :
-                       (modrm[5:3] == 3'd6) ? tr6 : (modrm[5:3] == 3'd7) ? tr7 : tr345[modrm[4:3]];
+                       (modrm[5:3] == 3'd6) ? tr6 : (modrm[5:3] == 3'd7) ? tr7 :
+                       (modrm[5:3] == 3'd4) ? tr4 : (modrm[5:3] == 3'd5) ? tr5 : 32'h0;   // TR3: read buffer
       // CPUID: the register rfix (0 EAX, 1 ECX, 2 EDX, 3 EBX) of leaf A (EAX): leaf 0 = highest
       // leaf 1, "GenuineIntel"; leaf 1 = the signature, no feature flags; others 0
       E_CPUID:
@@ -1498,7 +1511,7 @@ module tetrium_exec #(
       c_ck  <= (m_eop == E_DLO) || (m_eop == E_DHI) || (m_eop == E_IOMAP) || (m_eop == E_IOBIT) || (m_eop == E_LARV) ||
                (m_eop == E_ARPL) || (m_eop == E_TSSOFF) || (m_eop == E_IRVM) || (m_eop == E_TLFL) || (m_eop == E_TSSDESC) ||
                (m_eop == E_IRNT) || (m_eop == E_LDTSK) || (m_eop == E_SEGVAL) || (m_eop == E_GATE) ||
-               (m_eop == E_OLDSP) || (m_eop == E_PADDR) || (m_eop == E_LDSP) || (m_eop == E_EFL) ||
+               (m_eop == E_OLDSP) || (m_eop == E_SSB) || (m_eop == E_LDSP) || (m_eop == E_EFL) ||
                (m_eop == E_TFLG) || (m_eop == E_TLDW) || ((m_eop == E_LDCS) && (m_uw[UW_CK_L +: UW_CK_W] == 5'(CK_TCS)));
       c_jn  <= ((m_eop == E_JNEAR) && jn_chk) || ((m_eop == E_JFAR) && m_os32 && (!cr0[0] || vm));
       c_mc  <= (m_eop == E_MUL) || (m_eop == E_AAD) || (m_eop == E_IMUL2) || (m_eop == E_DIV) || (m_eop == E_AAM) ||
@@ -1509,7 +1522,7 @@ module tetrium_exec #(
                (m_eop == E_DLO) || (m_eop == E_DHI) || (m_eop == E_IOMAP) || (m_eop == E_IOBIT) || (m_eop == E_LARV) ||
                (m_eop == E_ARPL) || (m_eop == E_TSSOFF) || (m_eop == E_IRVM) || (m_eop == E_TLFL) || (m_eop == E_TSSDESC) ||
                (m_eop == E_IRNT) || (m_eop == E_LDTSK) || (m_eop == E_SEGVAL) || (m_eop == E_GATE) ||
-               (m_eop == E_OLDSP) || (m_eop == E_PADDR) || (m_eop == E_LDSP) || (m_eop == E_EFL) ||
+               (m_eop == E_OLDSP) || (m_eop == E_SSB) || (m_eop == E_LDSP) || (m_eop == E_EFL) ||
                (m_eop == E_TFLG) || (m_eop == E_TLDW) || ((m_eop == E_LDCS) && (m_uw[UW_CK_L +: UW_CK_W] == 5'(CK_TCS))) ||
                ((m_eop == E_JNEAR) && jn_chk) || ((m_eop == E_JFAR) && m_os32 && (!cr0[0] || vm));
       xc_nz <= (m_xc != 3'd0);
@@ -1550,8 +1563,9 @@ module tetrium_exec #(
   wire        fsame    = (A[15:0] == s[1]);
   wire [31:0] far_t    = fsame ? ip_b : {A[15:0], ip_b[15:0]};
   // (the predicted target against both forms in parallel with the CS compare)
-  wire        fhit_n   = (ptgt == ip_b);
-  wire        fhit_f   = (ptgt == {A[15:0], ip_b[15:0]});
+  wire        fhit_lo  = (ptgt[15:0] == ip_b[15:0]);
+  wire        fhit_n   = fhit_lo && (ptgt[31:16] == ip_b[31:16]);
+  wire        fhit_f   = fhit_lo && (ptgt[31:16] == A[15:0]);
   // (far CALL / JMP / RETF only: not the interrupt sequence's JFAR)
   wire        far_p    = (fsame || (A[15:0] != 16'h0)) && !pg &&
                          (op == 8'h9A || op == 8'hEA || op == 8'hCA || op == 8'hCB || op == 8'hFF);
@@ -1835,7 +1849,7 @@ module tetrium_exec #(
       E_GATE:  x0p_r = B[11] ? {B[31:16], A[15:0]} : {16'h0, A[15:0]};          // call gate: target EIP
       E_TSSOFF: x0p_r = tss_off;
       E_OLDSP: x0p_r = ss_b ? gm[4] : {16'h0, gm[4][15:0]};
-      E_PADDR: x0p_r = a_ssbase + (ss_b ? gm[4] : {16'h0, gm[4][15:0]}) + ({27'd0, gcnt} << (os32 ? 2 : 1));
+      E_SSB:   x0p_r = a_ssbase;
       E_LDSP:  x0p_r = ss_b ? spn : {gm[4][31:16], spn[15:0]};
       E_IOMAP: x0p_r = {16'h0, B[15:0]} + {19'h0, A[15:3]};
       E_LARV:  x0p_r = (ck == CK_LSL) ? (B[23] ? {B[19:16], t1[15:0], 12'hFFF} : {12'h0, B[19:16], t1[15:0]}) :
@@ -2271,7 +2285,6 @@ module tetrium_exec #(
           cr0[3]  <= 1'b1;
         end
         if (eop == E_LDCR3) cr3 <= B;
-        if (eop == E_TWR && op[2] && modrm[5:3] >= 3'd3 && modrm[5:3] <= 3'd5) tr345[modrm[4:3]] <= B;
         if (eop == E_TLFL) begin
           nt <= B[14] || tsk_lnk; iopl <= B[13:12];
           rf <= (sz == 2'd2) && B[16];
@@ -2358,9 +2371,13 @@ module tetrium_exec #(
     else if ((complete && (do_inj || want_int || (iend && inj))) || ff_take || (xs == X_INTA)) dbdel <= 1'b0;
   always_ff @(posedge clk) begin
     if (rst) begin
-      for (int i = 0; i < 4; i++) begin dr[i] <= '0; drm1[i] <= '1; end
+      for (int i = 0; i < 4; i++) dr[i] <= '0;
       dr6_b <= 4'h0; dr6_h <= 4'h1; dr7 <= 32'h0000_0400;
+      tr4 <= '0; tr5 <= '0;
     end else begin
+      // MOV TR4 / TR5 (TR3: into the fill buffer, see tr4 / tr5 above)
+      if (wcommit_x && (eop == E_TWR) && op[2] && (modrm[5:3] == 3'd4)) tr4 <= B;
+      if (wcommit_x && (eop == E_TWR) && op[2] && (modrm[5:3] == 3'd5)) tr5 <= B;
       if (complete && !fault_x && iend) dr6_b <= dr6_b | dbacc_n;     // (B bits of a completed uop)
       if (complete && ibf) dr6_b <= dr6_b | (ibm & ib_en);
       if (ff_db) dr6_b <= dr6_b | ffbm;
@@ -2372,7 +2389,7 @@ module tetrium_exec #(
       if (wcommit && (eop == E_LDTSK)) begin dr7[0] <= 1'b0; dr7[2] <= 1'b0; dr7[4] <= 1'b0; dr7[6] <= 1'b0; end
       if (wcommit_x && (eop == E_TWR) && !op[2])
         if (!modrm[5]) begin
-          dr[modrm[4:3]] <= B; drm1[modrm[4:3]] <= B[31:2] - 30'd1;
+          dr[modrm[4:3]] <= B;
         end else if (modrm[3]) dr7 <= B | 32'h0000_0400;
         else begin dr6_b <= B[3:0]; dr6_h <= B[15:12]; end
     end
@@ -2414,13 +2431,16 @@ module tetrium_exec #(
   // BOUND compare / bit scan: registered in the uop's first cycle
   always_ff @(posedge clk)
     if (xs == X_IDLE) begin
-      logic [31:0] bm_;
+      logic [31:0] bm_, brv;
+      logic [4:0]  blo;
       bnd_lt  <= ssz(ar[34:3], sz) ^ ar[0];
       bm_     = (sz == 2'd2) ? B : {16'h0, B[15:0]};
       bs_zero <= (bm_ == 32'h0);
-      bs_idx  <= 5'd0;
-      if (op[0]) begin for (int i = 0; i < 32; i++) if (bm_[i]) bs_idx <= 5'(i); end           // BSR: highest
-      else       begin for (int i = 31; i >= 0; i--) if (bm_[i]) bs_idx <= 5'(i); end          // BSF: lowest
+      // one lowest-set-bit encoder: BSR scans the reversed operand, its index is 31 - that one
+      for (int i = 0; i < 32; i++) brv[i] = op[0] ? bm_[31 - i] : bm_[i];
+      blo = 5'd0;
+      for (int i = 31; i >= 0; i--) if (brv[i]) blo = 5'(i);
+      bs_idx  <= op[0] ? ~blo : blo;
     end
   always_ff @(posedge clk) begin
     if (xs == X_IDLE) begin
@@ -2562,9 +2582,12 @@ module tetrium_exec #(
             end
           end else begin
             logic [32:0] r2;
+            logic [33:0] rd;
             r2 = {drem[31:0], dq[31]};
-            if (r2 >= {1'b0, ddv}) begin
-              drem <= r2 - {1'b0, ddv};
+            // (one carry chain: the subtraction's borrow is the compare)
+            rd = {1'b0, r2} - {2'b0, ddv};
+            if (!rd[33]) begin
+              drem <= rd[32:0];
               dq   <= {dq[30:0], 1'b1};
             end else begin
               drem <= r2;
@@ -2646,12 +2669,15 @@ module tetrium_exec #(
   // after the store's W cycle, so that code fetched before the store is not
   // executed
   // (fetch stalls while the invalidations are queued, so the refetch sees them)
+  // An A20M# change does the same: the younger instructions formed their linear addresses
+  // (A2) and translations (data micro-TLB) with the old gate; the instruction in E (the OUT
+  // that changes it) completes, the rest is refetched and sees the new gate
   logic smc_p;
-  wire  smcf = (smc_p || smc_hit) && (last || repz_end);
+  wire  smcf = (smc_p || smc_hit || a20_chg) && (last || repz_end);
   always_ff @(posedge clk)
     if (rst) smc_p <= 1'b0;
     else if (complete && smcf) smc_p <= 1'b0;
-    else if (smc_hit || snp_hit) smc_p <= 1'b1;
+    else if (smc_hit || snp_hit || a20_chg) smc_p <= 1'b1;
   always_ff @(posedge clk) begin
     if (rst) begin
       flush_r <= 1'b0; rd_fetch <= 1'b0; rd_inject <= 1'b0; rd_stop <= 1'b0;
