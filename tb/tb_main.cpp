@@ -726,8 +726,28 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     bool rd32 = rpm && strchr("DWQY", mg[3]);                   // ... in a 32-bit code segment
     int rring = !rpm ? 0 : strchr("UW", mg[3]) ? 3 : strchr("PQ", mg[3]) ? 2 : strchr("XY", mg[3]) ? 1 : 0;   // ... at a ring
     bool rv86 = rpm && mg[3] == 'V';                            // ... in V86 mode
-    bool rprog = (n == 4) && (!memcmp(mg, "R386", 4) || rpm);
-    if (rprog) {
+    // 'RST1' (tests/rstate.py, the random-state fuzzer): u32 seed, nretire, flags (bit 0: paging),
+    //   cpte_lo, cpte_hi (physical range of the code pages' PTEs), nchunks, nchunks x (u32 addr,
+    //   len, bytes); 16 MB of pseudo-random bytes from the seed, the chunks, real mode at 0100:0000
+    const bool rst = (n == 4) && !memcmp(mg, "RST1", 4);
+    uint32_t rst_fl = 0, cpte_lo = 0, cpte_hi = 0;
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> rst_ch;
+    bool rprog = (n == 4) && (!memcmp(mg, "R386", 4) || rpm || rst);
+    if (rst) {
+        uint32_t nch = 0;
+        bool okh = fread(&seed, 4, 1, f) == 1 && fread(&nret, 4, 1, f) == 1 && fread(&rst_fl, 4, 1, f) == 1 &&
+                   fread(&cpte_lo, 4, 1, f) == 1 && fread(&cpte_hi, 4, 1, f) == 1 && fread(&nch, 4, 1, f) == 1;
+        for (uint32_t k = 0; okh && k < nch; k++) {
+            uint32_t ca = 0, cl = 0;
+            okh = fread(&ca, 4, 1, f) == 1 && fread(&cl, 4, 1, f) == 1 && ca + (uint64_t)cl <= sizeof(mem);
+            if (!okh) break;
+            rst_ch.push_back({ca, std::vector<uint8_t>(cl)});
+            okh = fread(rst_ch.back().second.data(), 1, cl, f) == cl;
+        }
+        if (!okh) { printf("%s LOADERR\n", name.c_str()); fclose(f); return; }
+        if (lock_nret > 0) nret = lock_nret;
+        sg0[0] = sg0[2] = sg0[3] = 0; sg0[1] = 0x0100; eip0 = 0; gp0[4] = 0;
+    } else if (rprog) {
         bool okh = fread(&seed, 4, 1, f) == 1 && fread(&nret, 4, 1, f) == 1 && fread(gp0, 4, 8, f) == 8 &&
                    fread(sg0, 2, 6, f) == 6 && fread(&eip0, 4, 1, f) == 1 && fread(&efl0, 4, 1, f) == 1 &&
                    fread(ivt, 2, 256, f) == 256 && fread(img, 1, sizeof(img), f) == sizeof(img);
@@ -743,16 +763,23 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
         // the model's OUT: port 92h bit 1 = A20 gate, as on the DUT bus (86Box's own port 92
         // handler also recalculates the mask from inside the instruction)
         static const ref_io_t lio = { nullptr, [](uint16_t port, int size, uint32_t val) {
-            for (int i = 0; i < size; i++) ref_o.push_back({(uint16_t)(port + i), (uint8_t)(val >> (8 * i))});
-            if (port == 0x92) ref_set_a20(val & 2); } };
+            for (int i = 0; i < size; i++) {
+                ref_o.push_back({(uint16_t)(port + i), (uint8_t)(val >> (8 * i))});
+                // (any byte of the OUT: a word / dword at 91h writes 92h too)
+                if ((uint16_t)(port + i) == 0x92) ref_set_a20((val >> (8 * i)) & 2);
+            } } };
         if (ref_init(16384, &lio)) { printf("%s REFERR\n", name.c_str()); return; }
         ref_config(CPU_SIG, HAS_CPUID, 1);
         inited = true;
     }
     const uint64_t ref_cyc0 = ref_cycles();
     // DUT
-    memset(mem, 0, MEM1M + 0x10000);
-    if (rprog) {
+    memset(mem, 0, rst ? sizeof(mem) : MEM1M + 0x10000);
+    if (rst) {
+        uint32_t x = seed * 2654435761u + 12345;
+        for (uint32_t a = 0; a < sizeof(mem); a++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; mem[a] = x >> 11; }
+        for (auto &c : rst_ch) memcpy(mem + c.first, c.second.data(), c.second.size());
+    } else if (rprog) {
         // pseudo-random data everywhere, the code segment, IVT -> handlers in the code segment
         uint32_t x = seed * 2654435761u + 12345;
         for (uint32_t a = 0x400; a < MEM1M; a++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; mem[a] = x >> 11; }
@@ -788,7 +815,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     ref_reset();
     ref_set_a20(1);
     uint8_t *rram = ref_ram();
-    memset(rram, 0, ref_ram_size()); memcpy(rram, mem, MEM1M + 0x10000);
+    memset(rram, 0, ref_ram_size()); memcpy(rram, mem, rst ? std::min((size_t)ref_ram_size(), sizeof(mem)) : MEM1M + 0x10000);
     ref_state_t rs;
     memset(&rs, 0, sizeof(rs));
     for (int k = 0; k < 8; k++) rs.gpr[k] = gp0[k];
@@ -800,10 +827,17 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     ref_wlog_clear();
 
     std::deque<RefWr> rq;
-    std::map<uint32_t, uint8_t> loose;            // PTE bytes written by one side only so far (see RefWr)
+    std::map<uint32_t, uint8_t> loose;
+    // (RST1 with paging: the physical address of the PTE of a linear page, from the model's tables)
+    auto rst_pte = [&](uint32_t cr3, uint32_t pg) {
+        uint32_t pa = ((cr3 & ~0xFFFu) + (pg >> 10) * 4) & 0xFFFFFF, pde;
+        memcpy(&pde, rram + pa, 4);
+        return ((pde & ~0xFFFu) + (pg & 0x3FF) * 4) & 0xFFFFFF;
+    };            // PTE bytes written by one side only so far (see RefWr)
     long ins = 0, nmis = 0, hist[256] = {0};
     bool trap_pending = false, ss_pending = false, done = false;
     bool ustop = false;            // stopped at an undefined 16-bit SHLD / SHRD (see below)
+    bool nwstop = false;           // stopped at paging with CR0.NW = 1 (see below)
     bool shut_done = false;
     uint32_t dip_last = 0;
     // a delivery the DUT follows with a debug trap (data breakpoint / T bit): the model ran
@@ -884,9 +918,12 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
             } else {
                 const bool was_trap = trap_pending && inj;     // (a trap after an instruction the model steps now)
                 if (was_trap) trap_pending = false;
+                // (after MOV / POP SS the model steps the next instruction too: its undefined flags)
+                const uint32_t um_ss = ss_pending ? undef_flags(dib) : 0;
                 ss_pending = false;
                 um = inj && !was_trap && !(pre.eflags & 0x100) ? 0 : undef_flags(ib);
                 if (!inj) um = undef_flags(ib);
+                um |= um_ss;
                 r = ref_step();
                 if (inj && S.top->dbg_ret_dbt) { model_ahead = true; skip = true; }
             }
@@ -903,6 +940,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 for (int k = 0; k < nw; k++) {
                     uint32_t a = wl[k].addr & 0xFFFFFF;
                     if (rpg && npg >= 0 && a >= 0x8E000 && a < 0x8F000 && (long)((a - 0x8E000) >> 2) == npg) loose[a] = wl[k].val;
+                    else if (rst && (rst_fl & 1) && npg >= 0 && (a & ~3u) == rst_pte(pre.creg3, (uint32_t)npg)) loose[a] = wl[k].val;
                     else rq.push_back({a, wl[k].val, ins, npg});
                 }
                 ref_wlog_clear();
@@ -974,7 +1012,8 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                         // after the code) the model has not fetched from yet (an interrupt came first,
                         // or the prefetch ran past the instruction's page): the PTE as the model has it
                         // with A set; the model takes it over (it would set A itself later)
-                        if (rpg && d.first >= 0x8E000 + 0x10 * 4 && d.first < 0x8E000 + 0x21 * 4 &&
+                        if (((rpg && d.first >= 0x8E000 + 0x10 * 4 && d.first < 0x8E000 + 0x21 * 4) ||
+                             (rst && d.first >= cpte_lo && d.first < cpte_hi)) &&
                             d.second == (rram[d.first] | ((d.first & 3) ? 0 : 0x20))) {
                             rram[d.first] = d.second; S.dq.pop_front(); continue;
                         }
@@ -1004,19 +1043,27 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                                        dut_o.front().second, ref_o.front().first, ref_o.front().second);
                     dut_o.pop_front(); ref_o.pop_front();
                 }
+                static bool shx_u_prev = false;
                 // a 16-bit SHLD / SHRD by 17-31 (in a random program reached mid-instruction, e.g. through
                 // a return address the program overwrote): the result is undefined (Tetrium gives the
                 // Pentium pattern, 86Box another); the run stops there and counts as passed
-                if (bl && rprog && !inj) {
+                // (its store is compared at the next retire: also right after one, e.g. an interrupt)
+                bool shx_u = false;
+                if (rprog && !inj) {
                     int o = 0, p66 = 0;
                     while (o < 13 && (ib[o] == 0x26 || ib[o] == 0x2E || ib[o] == 0x36 || ib[o] == 0x3E || ib[o] == 0xF2 ||
                                       ib[o] == 0xF3 || ib[o] == 0xF0 || (ib[o] >= 0x64 && ib[o] <= 0x67))) { p66 ^= (ib[o] == 0x66); o++; }
                     const int csd = (pre.seg[REF_CS].attr >> 10) & 1;
                     if (!(csd ^ p66) && ib[o] == 0x0F && (ib[o + 1] & 0xF6) == 0xA4) {
                         const int cnt = (ib[o + 1] & 1) ? (pre.gpr[1] & 31) : (ib[(dip - pre.eip - 1) & 15] & 31);
-                        if (cnt > 16) { ustop = true; done = true; bl = 0; }
+                        shx_u = cnt > 16;
                     }
                 }
+                if (bl && rprog && (shx_u || shx_u_prev)) { ustop = true; done = true; bl = 0; }
+                // paging with CR0.NW = 1 (random code wrote CR0): write hits stay in the cache and
+                // the walker reads memory, a known difference (README); the run stops there, passed
+                if (rprog && !bl && ((post.creg0 & 0xA0000000u) == 0xA0000000u)) { nwstop = true; done = true; }
+                shx_u_prev = shx_u;
                 if (bl) {
                     nmis++;
                     int oi = 0;
@@ -1031,7 +1078,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                         printf("  pre:");
                         for (int k = 0; k < 8; k++) printf(" %s=%08x", GN[k], pre.gpr[k]);
                         for (int k = 0; k < 6; k++) printf(" %s=%04x", SN[k], pre.seg[k].sel);
-                        printf(" fl=%04x\n", pre.eflags & 0xFFFF);
+                        printf(" fl=%04x cs.base=%08x cr2 after=%08x\n", pre.eflags & 0xFFFF, pre.seg[REF_CS].base, post.creg2);
                     }
                     if (getenv("LOCKDBG")) {
                         printf("  pre: ax=%04x cx=%04x dx=%04x bx=%04x sp=%04x bp=%04x si=%04x di=%04x ds=%04x es=%04x ss=%04x fl=%04x\n",
@@ -1119,7 +1166,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     if (!nmis && done && !md)
         printf("%-12s LOCK OK insns=%ld cycles=%ld ipc=%.3f ref486=%llu%s\n", name.c_str(), ins, S.cyc, (double)ins / S.cyc,
                (unsigned long long)(ref_cycles() - ref_cyc0), (std::string(irq ? " irqs=" + std::to_string(S.n_inta) : "") + (S.nmi_per ? " nmis=" + std::to_string(S.n_nmi) : "") +
-               (ustop ? " (stopped at an undefined 16-bit SHLD / SHRD)" : "")).c_str());
+               (ustop ? " (stopped at an undefined 16-bit SHLD / SHRD)" : nwstop ? " (stopped at paging with CR0.NW = 1)" : "")).c_str());
     else {
         printf("%-12s LOCK MISMATCH n=%ld%s first: %s", name.c_str(), nmis, done ? "" : (nmis ? "" : " TIMEOUT"), first);
     if (!done && !nmis) printf(" (insns=%ld cycles=%ld)\n", ins, S.cyc);

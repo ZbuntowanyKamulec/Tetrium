@@ -74,17 +74,24 @@ rom_rl(uint32_t addr, void *priv)
 #define WLOG_MAX (1 << 20)
 static ref_wr_t wlog[WLOG_MAX];
 static uint8_t  wlog_old[WLOG_MAX];    /* the byte overwritten (undo of a step) */
+static uint8_t  wlog_ad[WLOG_MAX];     /* a PDE / PTE accessed / dirty update */
 static int      wlog_n;
 
 static inline void
-wr8(uint32_t addr, uint8_t val)
+wr8x(uint32_t addr, uint8_t val, int ad)
 {
     if (wlog_n < WLOG_MAX) {
         wlog[wlog_n].addr  = addr;
         wlog[wlog_n].val   = val;
+        wlog_ad[wlog_n]    = ad;
         wlog_old[wlog_n++] = ram[addr];
     }
     ram[addr] = val;
+}
+static inline void
+wr8(uint32_t addr, uint8_t val)
+{
+    wr8x(addr, val, 0);
 }
 /* RAM write handlers that never enter the write lookup cache, so every
    store of the interpreter comes through here */
@@ -115,7 +122,7 @@ static void
 ref_ad(uint32_t addr, uint32_t val)
 {
     for (int i = 0; i < 4; i++)
-        wr8(addr + i, (val >> (8 * i)) & 0xff);
+        wr8x(addr + i, (val >> (8 * i)) & 0xff, 1);
 }
 
 const ref_wr_t *
@@ -367,7 +374,7 @@ insn_len(const uint8_t *b, int n, int d32)
     if (op == 0x0F) {
         NEED(i);
         op = b[i++];
-        if (op <= 0x03 || (op >= 0x20 && op <= 0x23) || op == 0x24 || op == 0x26 || (op >= 0x90 && op <= 0x9F) ||
+        if (op <= 0x03 || (op >= 0x10 && op <= 0x13) || (op >= 0x20 && op <= 0x23) || op == 0x24 || op == 0x26 || (op >= 0x90 && op <= 0x9F) ||
             op == 0xA3 || op == 0xA5 || op == 0xAB || op == 0xAD || op == 0xAF || (op >= 0xB0 && op <= 0xB7) ||
             (op >= 0xBB && op <= 0xC1)) mr = 1;
         else if (op == 0xA4 || op == 0xAC || op == 0xBA) { mr = 1; imm = 1; }
@@ -514,12 +521,38 @@ static struct {
     uint32_t    use32;
     int         stack32, oldcpl, optype;
     uint16_t    oldcs, cur_status;
+    uint32_t    dr6;
 } snap;
+int x86ref_xfer_on;      /* (386_dynarec.c: no trap after a transfer beyond the CS limit) */
+static int pc_user = -1;   /* (CPL 3 at the last fetch-page check, ref_step) */
+/* a far CALL (9A, FF /3): the 486 pushes the old CS and EIP before the branch fault of a
+   target beyond the CS limit is resolved (SDM Vol. 3 22.31.3): the pushes stay in memory */
+static int
+is_fcall(uint32_t lin)
+{
+    uint32_t msk = rammask & (mem_size * 1024u - 1);
+    for (int i = 0; i < 14; i++) {
+        uint8_t b = ram[(lin + i) & msk];
+        switch (b) {
+            case 0x26: case 0x2e: case 0x36: case 0x3e: case 0x64: case 0x65:
+            case 0x66: case 0x67: case 0xf0: case 0xf2: case 0xf3:
+                continue;
+            case 0x9a:
+                return 1;
+            case 0xff:
+                return ((ram[(lin + i + 1) & msk] >> 3) & 7) == 3;
+            default:
+                return 0;
+        }
+    }
+    return 0;
+}
 static void
 snap_take(void)
 {
     flags_rebuild();
     snap.st         = cpu_state;
+    snap.dr6        = dr[6];
     snap.use32      = use32;
     snap.stack32    = stack32;
     snap.oldcpl     = oldcpl;
@@ -530,13 +563,23 @@ snap_take(void)
 /* undo the step (registers and the memory written since log entry w0), then
    deliver #GP(0) at the instruction as exec386 does for a faulting one */
 static void
-xfer_fault(int w0)
+xfer_fault(int w0, int keep)
 {
-    int a;
+    int a, n = w0;
+    /* (the accessed / dirty bits stay: the 486 translated the push of a CALL before
+       the transfer's #GP, see the core's st_tr; a far CALL's pushes stay too: keep) */
     for (int i = wlog_n - 1; i >= w0; i--)
-        ram[wlog[i].addr] = wlog_old[i];
-    wlog_n         = w0;
+        if (!wlog_ad[i] && !keep)
+            ram[wlog[i].addr] = wlog_old[i];
+    for (int i = w0; i < wlog_n; i++)
+        if (wlog_ad[i] || keep) {
+            wlog[n] = wlog[i]; wlog_old[n] = wlog_old[i]; wlog_ad[n++] = wlog_ad[i];
+        }
+    wlog_n         = n;
     cpu_state      = snap.st;
+    dr[6]          = snap.dr6;      /* (a faulting instruction sets no B bit, takes no trap) */
+    trap           = 0;
+    dr6_b_pend     = 0;
     use32          = snap.use32;
     stack32        = snap.stack32;
     oldcpl         = snap.oldcpl;
@@ -577,7 +620,15 @@ cs_past_limit(uint32_t pc0)
     for (int k = 0; k < 16; k++)
         b[k] = ram[lin2phys(cs + pc0 + k) & rammask & (mem_size * 1024u - 1)];
     len = insn_len(b, 16, !!use32);
-    return (len > 0) && (pc0 + (uint32_t) len - 1 > lim);
+    if (!((len > 0) && (pc0 + (uint32_t) len - 1 > lim)))
+        return 0;
+    /* the bytes up to the limit are fetched first: their #PF comes before the #GP (the 486
+       and Bochs check the limit when the fetch passes it); 86Box then runs into that #PF */
+    if (cr0 >> 31)
+        for (uint32_t o = pc0; o <= lim; o++)
+            if (mmutranslate_noabrt(cs + o, 0) == 0xffffffffffffffffULL)
+                return 0;
+    return 1;
 }
 
 /* shutdown held (the testbench's NMI runs): a step that ends in 86Box's reset (a triple
@@ -640,11 +691,18 @@ ref_step(void)
     int      w0   = wlog_n;
 
     x86_was_reset = 0;
+    /* a privilege change to or from CPL 3 (IRET, an interrupt, a task switch): the 486
+       checks the code page's U/S bit again at the next fetch; 86Box keeps the page cached
+       across the change (getpccache() runs only when the fetch page changes) */
+    if ((CPL == 3) != pc_user) {
+        pc_user = (CPL == 3);
+        pccache = 0xFFFFFFFFu;
+    }
     if (hold_shut)
         hs_take();
     if (cs_past_limit(pc0)) {
         snap_take();
-        xfer_fault(w0);             /* (nothing to undo: #GP(0) at the instruction) */
+        xfer_fault(w0, 0);          /* (nothing to undo: #GP(0) at the instruction) */
         rep = 0;
     } else {
         if (xfer)
@@ -670,11 +728,14 @@ ref_step(void)
                 }
             }
             rep = 0;
-        } else
+        } else {
+            x86ref_xfer_on = xfer;
             run_one();
+            x86ref_xfer_on = 0;
+        }
         /* (a delivered fault leaves EIP at its handler, inside the limit) */
         if (xfer && !x86_was_reset && (cpu_state.pc > cpu_state.seg_cs.limit_high))
-            xfer_fault(w0);
+            xfer_fault(w0, is_fcall(ph0));
     }
     if (rep && !trp) {
         /* a REP string instruction yields with pc at its start while the
@@ -799,8 +860,9 @@ extern uint64_t mmutranslate_noabrt(uint32_t addr, int rw);
 uint32_t
 ref_phys(uint32_t lin)
 {
+    /* (with the A20 mask, as the model's accesses: rammask) */
     if (!(cr0 >> 31))
-        return lin;
+        return lin & rammask;
     uint64_t a = mmutranslate_noabrt(lin, 0);
-    return (a > 0xffffffffULL) ? lin : (uint32_t) a;
+    return ((a > 0xffffffffULL) ? lin : (uint32_t) a) & rammask;
 }

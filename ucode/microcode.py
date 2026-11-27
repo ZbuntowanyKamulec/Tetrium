@@ -181,6 +181,11 @@ for w in (0, 1):
            [U(e='PASSB', sb='REG', d1='RM')])
     define(0x8A | w, [U(a='EA', mrd=1, e='PASSB', sb='MEM', d1='REG')],
            [U(e='PASSB', sb='RM', d1='REG')])
+    # UMOV (0F 10-13, undocumented): on the 386 / 486 outside ICE mode a MOV r/m, r / MOV r, r/m
+    define(0x10 | w, [U(a='EA', e='PASSB', sb='REG', wr='PRI')],
+           [U(e='PASSB', sb='REG', d1='RM')], pg=1)
+    define(0x12 | w, [U(a='EA', mrd=1, e='PASSB', sb='MEM', d1='REG')],
+           [U(e='PASSB', sb='RM', d1='REG')], pg=1)
 # MOV r/m, Sreg: memory form stores 16 bits, register form writes the operand size
 define(0x8C, [U(a='EA', e='PASSB', sb='SEG', sz='W16', wr='PRI')],
        [U(e='PASSB', sb='SEG', d1='RM', sz='Z')])
@@ -254,6 +259,9 @@ define(0xCB, [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z'),
 define(0xCC, [U(e='INT', sz='W16')])                      # INT3, INTO: not IOPL-sensitive in V86
 define(0xCD, [U(e='INT', sz='W16', chk='V86IOPL')])
 define(0xCE, [U(e='INTO', sz='W16')])
+# ICEBP (INT1): INT 1 as an event, not a software interrupt: no IOPL check in V86, no gate
+# DPL check, EXT set in error codes; returns to the next instruction, DR6 unchanged
+define(0xF1, [U(e='INT', sz='W16')])
 define(0xCF, [U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T0', sz='Z', chk='V86IOPL'),
               U(a='POP', mrd=1, e='PASSB', sb='MEM', d1='T1', sz='Z'),
               U(a='POP', mrd=1, e='IRET', sb='MEM', sz='Z')])

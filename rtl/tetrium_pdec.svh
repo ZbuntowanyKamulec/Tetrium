@@ -76,6 +76,7 @@ localparam int PDW = 12;
     // ---- 0F page
     casez (b)
       8'h00, 8'h01, 8'h02, 8'h03: m0f = 1'b1;
+      8'h10, 8'h11, 8'h12, 8'h13: m0f = 1'b1;               // UMOV
       8'h20, 8'h21, 8'h22, 8'h23, 8'h24, 8'h26: m0f = 1'b1;
       8'b1000_????: i0f = 2'd2;                             // Jcc rel16/32
       8'b1001_????: m0f = 1'b1;                             // SETcc

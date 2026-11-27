@@ -964,7 +964,7 @@ module tetrium_fetch #(
     st_q <= st;
     if (ptr && (f_req && f_acc || f_done)) $display("F walk acc=%0d done=%0d fw_out=%0d st=%0d", f_req && f_acc, f_done, fw_out, st);
     if (ptr && st != st_q)
-      $display("F st %0d -> %0d f_lin=%08x lp_ok=%0d lpf=%0d:%05x dr=%0d req=%0d", st_q, st, f_lin, lp_ok, lpf_v, lpf_vpn, fe_drained, f_req);
+      $display("F st %0d -> %0d f_lin=%08x lp_ok=%0d lpf=%0d:%05x ppn=%05x dr=%0d req=%0d", st_q, st, f_lin, lp_ok, lpf_v, lpf_vpn, fppn, fe_drained, f_req);
   end
 `endif
   // ---------------------------------------------------------------- FSM

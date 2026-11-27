@@ -647,6 +647,7 @@ class Gen:
             starts.append(addr)
             addr += len(it[1]) + (it[2] if it[0] == 'br' else 2 + len(it[2]) if it[0] == 'abs' else 0)
         assert addr < H_FAULT - 16, addr
+        self.starts, self.end = starts, addr       # (tests/rstate.py: its own resume table)
         code = bytearray(b'\x90' * 0x10000)
         for a, it in zip(starts, self.items):
             if it[0] == 'b':

@@ -161,10 +161,15 @@ tests/rlock.sh      # random programs in lockstep (PM=1: protected mode, PG=1: p
                     #   R3=1 / RING=1, 2: ring 3 / 1, 2, V86=1: virtual-8086 mode, IRQ=1: with interrupts,
                     #   NMI=1: with NMIs)
 tests/lock.sh       # benchmarks and directed tests in lockstep
+tests/rfuzz.sh      # random CPU states (modes, descriptors, page tables) + random code in lockstep
 tests/clocks.py     # cycles per instruction form, against the i486
 tests/probe.sh      # 486 behaviour probes: the core against a Bochs 486 PC (bootable floppies)
 tests/perf.sh       # Dhrystone and CoreMark
 ```
+
+Known difference from a 486: the page walker reads page tables from memory, not through the
+D-cache. With `CR0.CD` = `NW` = 1 (write hits stay in the cache) a page-table write that hit
+the cache is not seen by the walk; a 486 would read the cached entry.
 
 Two bootable tests for a complete PC built around the CPU: `tests/hwstress` (stress test) and
 `tests/hwcheck` (self-checking: random programs generated on the machine, protected-mode,

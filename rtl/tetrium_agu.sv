@@ -370,6 +370,8 @@ module tetrium_agu (
   // offset: carry-save (3:2) + one adder; 16-bit addressing wraps at 64 KB here
   wire [31:0] o_s   = bv ^ iv ^ dva;
   wire [31:0] o_m   = (bv & iv) | (bv & dva) | (iv & dva);
+  // (the second part of a far pointer / BOUND (EA2) wraps too: (EA + 2 / 4) mod 64K, each
+  //  part limit-checked on its own, as the 386EX SingleStepTests show)
   wire [31:0] off   = (o_s + {o_m[30:0], 1'b0}) & amask;
 
   // secondary (store) address offset: PUSH (SP - size) or (E)DI; segment SS / ES

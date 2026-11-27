@@ -1,8 +1,21 @@
 diff --git a/src/cpu/386_common.c b/src/cpu/386_common.c
-index 837ba3b2b..e3c6b507e 100644
+index 837ba3b2b..401a3e627 100644
 --- a/src/cpu/386_common.c
 +++ b/src/cpu/386_common.c
-@@ -1904,6 +1904,7 @@ x86_int(int num)
+@@ -660,6 +660,12 @@ smm_seg_load(x86seg *s)
+     } else {
+         s->limit_high = (s->ar_high & 0x40) ? 0xffffffff : 0xffff;
+         s->limit_low  = s->limit + 1;
++        /* 86box-486: an expand-down segment whose limit is at or above its top
++           (FFFF / FFFFFFFF) has no valid offset (limit + 1 would wrap to 0) */
++        if (s->limit >= s->limit_high) {
++            s->limit_low  = 0xffffffff;
++            s->limit_high = 0;
++        }
+     }
+ 
+     if ((cr0 & 1) && !(cpu_state.eflags & VM_FLAG))
+@@ -1904,6 +1910,7 @@ x86_int(int num)
         pending debug trap before entering the handler; a task switch may
         establish a new task-switch trap during delivery. */
      trap = 0;
@@ -10,7 +23,7 @@ index 837ba3b2b..e3c6b507e 100644
  #ifdef USE_DYNAREC
      if (codegen_in_recompile && (num == 7))
          codegen_record_faulted = 1;
-@@ -1916,9 +1917,24 @@ x86_int(int num)
+@@ -1916,9 +1923,24 @@ x86_int(int num)
      if (num == 1)
          dr[7] &= ~0x2000;
  
@@ -37,7 +50,7 @@ index 837ba3b2b..e3c6b507e 100644
          addr = (num << 2) + idt.base;
  
          if ((num << 2UL) + 3UL > idt.limit) {
-@@ -1932,16 +1948,9 @@ x86_int(int num)
+@@ -1932,16 +1954,9 @@ x86_int(int num)
              } else
                  x86_int((is_p6 && (num != 0x08) && (num != 0x0d)) ? 0x0d : 0x08);
          } else {
@@ -57,7 +70,7 @@ index 837ba3b2b..e3c6b507e 100644
              }
  
              cpu_state.flags &= ~I_FLAG;
-@@ -1977,16 +1986,9 @@ x86_int_sw(int num)
+@@ -1977,16 +1992,9 @@ x86_int_sw(int num)
          if ((num << 2UL) + 3UL > idt.limit)
              x86_int(is_p6 ? 0x0d : 0x08);
          else {
@@ -77,7 +90,7 @@ index 837ba3b2b..e3c6b507e 100644
              }
  
              cpu_state.flags &= ~I_FLAG;
-@@ -1997,10 +1999,8 @@ x86_int_sw(int num)
+@@ -1997,10 +2005,8 @@ x86_int_sw(int num)
          }
      }
  
@@ -90,7 +103,7 @@ index 837ba3b2b..e3c6b507e 100644
      CPU_BLOCK_END();
  }
  
-@@ -2021,18 +2021,12 @@ x86_int_sw_rm(int num)
+@@ -2021,18 +2027,12 @@ x86_int_sw_rm(int num)
      if (cpu_state.abrt)
          return 1;
  
@@ -115,7 +128,7 @@ index 837ba3b2b..e3c6b507e 100644
  
      cpu_state.eflags &= ~VIF_FLAG;
      cpu_state.flags &= ~T_FLAG;
-@@ -2040,10 +2034,8 @@ x86_int_sw_rm(int num)
+@@ -2040,10 +2040,8 @@ x86_int_sw_rm(int num)
      cpu_use_exec ? loadcs(new_cs) : loadcs_2386(new_cs);
  
      cycles -= timing_int_rm;
@@ -128,7 +141,7 @@ index 837ba3b2b..e3c6b507e 100644
      CPU_BLOCK_END();
  
      return 0;
-@@ -2161,6 +2153,50 @@ cpu_dr7_update(void)
+@@ -2161,6 +2159,50 @@ cpu_dr7_update(void)
  }
  
  extern uint64_t mmutranslate_noabrt_2386(uint32_t addr, int rw);
@@ -374,10 +387,19 @@ index 8fa102645..135d10913 100644
 +    return 1;
 +}
 diff --git a/src/cpu/386_dynarec.c b/src/cpu/386_dynarec.c
-index f0b608aec..9a4dbb6c8 100644
+index f0b608aec..94619cbb6 100644
 --- a/src/cpu/386_dynarec.c
 +++ b/src/cpu/386_dynarec.c
-@@ -124,7 +124,9 @@ fetch_ea_32_long(uint32_t rmdat)
+@@ -47,6 +47,8 @@
+ 
+ #include "386_common.h"
+ #include "x86_interrupt.h"
++/* x86ref (Tetrium testbench): the instruction being stepped transfers control */
++extern int x86ref_xfer_on;
+ 
+ #if defined(__APPLE__) && defined(__aarch64__)
+ #    include <pthread.h>
+@@ -124,7 +126,9 @@ fetch_ea_32_long(uint32_t rmdat)
              cpu_state.eaaddr = getlong();
          }
      }
@@ -388,7 +410,7 @@ index f0b608aec..9a4dbb6c8 100644
          uint32_t addr = easeg + cpu_state.eaaddr;
          if (readlookup2[addr >> 12] != (uintptr_t) -1)
              eal_r = (uint32_t *) (readlookup2[addr >> 12] + addr);
-@@ -160,7 +162,9 @@ fetch_ea_16_long(uint32_t rmdat)
+@@ -160,7 +164,9 @@ fetch_ea_16_long(uint32_t rmdat)
          }
          cpu_state.eaaddr &= 0xFFFF;
      }
@@ -399,7 +421,7 @@ index f0b608aec..9a4dbb6c8 100644
          uint32_t addr = easeg + cpu_state.eaaddr;
          if (readlookup2[addr >> 12] != (uintptr_t) -1)
              eal_r = (uint32_t *) (readlookup2[addr >> 12] + addr);
-@@ -1637,7 +1641,7 @@ exec386_common(int32_t cycs, const int dbg)
+@@ -1637,7 +1643,7 @@ exec386_common(int32_t cycs, const int dbg)
              if (inboard386_present)
                  inboard_post_fixups();
  
@@ -408,7 +430,7 @@ index f0b608aec..9a4dbb6c8 100644
                  ins_fetch_fault = cpu_386_check_instruction_fault();
  
              /* Breakpoint fault has priority over other faults. */
-@@ -1673,11 +1677,26 @@ exec386_common(int32_t cycs, const int dbg)
+@@ -1673,11 +1679,26 @@ exec386_common(int32_t cycs, const int dbg)
                      trap = cpu_state.flags & T_FLAG;
  
                  cpu_state.pc++;
@@ -437,7 +459,7 @@ index f0b608aec..9a4dbb6c8 100644
              }
  #ifdef ENABLE_386_LOG
              else if (in_smm)
-@@ -1722,6 +1741,8 @@ block_ended:
+@@ -1722,6 +1743,8 @@ block_ended:
  
                  if (dbg && is386 && !x86_was_reset && ins_fetch_fault)
                      x86gen();
@@ -446,7 +468,16 @@ index f0b608aec..9a4dbb6c8 100644
              } else if (new_ne) {
                  flags_rebuild();
  
-@@ -1735,10 +1756,12 @@ block_ended:
+@@ -1729,16 +1752,20 @@ block_ended:
+                 oldcs = CS;
+                 cpu_state.oldpc = cpu_state.pc;
+                 x86_int(16);
+-            } else if (trap) {
++            } else if (trap && !(x86ref_xfer_on && (cpu_state.pc > cpu_state.seg_cs.limit_high))) {
++                /* (x86ref: a transfer beyond the CS limit is a #GP of the instruction,
++                   delivered by the testbench library, with no trap after it) */
+                 flags_rebuild();
+                 if (dbg) {
                      if (trap & 2) dr[6] |= 0x8000;
                      if (trap & 1) dr[6] |= 0x4000;
                      if (trap & 16) dr[6] |= 0x2000;
@@ -635,7 +666,7 @@ index e57ebeb61..5469a2e2b 100644
              dr[i] = 0x00000000;
          dr[6] = is586 ? 0xffff0ff0 : 0xffff1ff0;
 diff --git a/src/cpu/x86_ops_call.h b/src/cpu/x86_ops_call.h
-index 18a4d87ca..2e0326ba9 100644
+index 18a4d87ca..6fe5c84c6 100644
 --- a/src/cpu/x86_ops_call.h
 +++ b/src/cpu/x86_ops_call.h
 @@ -184,7 +184,7 @@ opFF_w_a16(uint32_t fetchdat)
@@ -656,7 +687,40 @@ index 18a4d87ca..2e0326ba9 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
-@@ -339,7 +339,7 @@ opFF_w_a32(uint32_t fetchdat)
+@@ -248,9 +248,13 @@ opFF_w_a16(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
++            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
+             new_pc = readmemw(easeg, cpu_state.eaaddr);
+-            new_cs = readmemw(easeg, (cpu_state.eaaddr + 2));
++            /* (Tetrium lockstep: 16-bit address, the second part at (EA + 2) mod 64K, each part limit-checked: 386EX) */
++            if (cpu_state.abrt)
++                return 1;
++            CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 2) & 0xffff), ((cpu_state.eaaddr + 2) & 0xffff) + 1);
++            new_cs = readmemw(easeg, ((cpu_state.eaaddr + 2) & 0xffff));
+             if (cpu_state.abrt)
+                 return 1;
+ 
+@@ -284,10 +288,14 @@ opFF_w_a16(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
++            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
+             old_pc = cpu_state.pc;
+             new_pc = readmemw(easeg, cpu_state.eaaddr);
+-            new_cs = readmemw(easeg, cpu_state.eaaddr + 2);
++            /* (Tetrium lockstep: 16-bit address, the second part at (EA + 2) mod 64K, each part limit-checked: 386EX) */
++            if (cpu_state.abrt)
++                return 1;
++            CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 2) & 0xffff), ((cpu_state.eaaddr + 2) & 0xffff) + 1);
++            new_cs = readmemw(easeg, ((cpu_state.eaaddr + 2) & 0xffff));
+             if (cpu_state.abrt)
+                 return 1;
+             cpu_state.pc = new_pc;
+@@ -339,7 +347,7 @@ opFF_w_a32(uint32_t fetchdat)
      switch (rmdat & 0x38) {
          case 0x00: /*INC w*/
              if (cpu_mod != 3) {
@@ -665,7 +729,7 @@ index 18a4d87ca..2e0326ba9 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
-@@ -359,7 +359,7 @@ opFF_w_a32(uint32_t fetchdat)
+@@ -359,7 +367,7 @@ opFF_w_a32(uint32_t fetchdat)
              break;
          case 0x08: /*DEC w*/
              if (cpu_mod != 3) {
@@ -674,7 +738,7 @@ index 18a4d87ca..2e0326ba9 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
-@@ -495,7 +495,7 @@ opFF_l_a16(uint32_t fetchdat)
+@@ -495,7 +503,7 @@ opFF_l_a16(uint32_t fetchdat)
      switch (rmdat & 0x38) {
          case 0x00: /*INC l*/
              if (cpu_mod != 3) {
@@ -683,7 +747,7 @@ index 18a4d87ca..2e0326ba9 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
-@@ -515,7 +515,7 @@ opFF_l_a16(uint32_t fetchdat)
+@@ -515,7 +523,7 @@ opFF_l_a16(uint32_t fetchdat)
              break;
          case 0x08: /*DEC l*/
              if (cpu_mod != 3) {
@@ -692,7 +756,40 @@ index 18a4d87ca..2e0326ba9 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
-@@ -650,7 +650,7 @@ opFF_l_a32(uint32_t fetchdat)
+@@ -559,9 +567,13 @@ opFF_l_a16(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5UL);
++            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
+             new_pc = readmeml(easeg, cpu_state.eaaddr);
+-            new_cs = readmemw(easeg, (cpu_state.eaaddr + 4));
++            /* (Tetrium lockstep: 16-bit address, the second part at (EA + 4) mod 64K, each part limit-checked: 386EX) */
++            if (cpu_state.abrt)
++                return 1;
++            CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 4) & 0xffff), ((cpu_state.eaaddr + 4) & 0xffff) + 1);
++            new_cs = readmemw(easeg, ((cpu_state.eaaddr + 4) & 0xffff));
+             if (cpu_state.abrt)
+                 return 1;
+ 
+@@ -595,10 +607,14 @@ opFF_l_a16(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5UL);
++            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
+             old_pc = cpu_state.pc;
+             new_pc = readmeml(easeg, cpu_state.eaaddr);
+-            new_cs = readmemw(easeg, cpu_state.eaaddr + 4);
++            /* (Tetrium lockstep: 16-bit address, the second part at (EA + 4) mod 64K, each part limit-checked: 386EX) */
++            if (cpu_state.abrt)
++                return 1;
++            CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 4) & 0xffff), ((cpu_state.eaaddr + 4) & 0xffff) + 1);
++            new_cs = readmemw(easeg, ((cpu_state.eaaddr + 4) & 0xffff));
+             if (cpu_state.abrt)
+                 return 1;
+             cpu_state.pc = new_pc;
+@@ -650,7 +666,7 @@ opFF_l_a32(uint32_t fetchdat)
      switch (rmdat & 0x38) {
          case 0x00: /*INC l*/
              if (cpu_mod != 3) {
@@ -701,7 +798,7 @@ index 18a4d87ca..2e0326ba9 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
-@@ -670,7 +670,7 @@ opFF_l_a32(uint32_t fetchdat)
+@@ -670,7 +686,7 @@ opFF_l_a32(uint32_t fetchdat)
              break;
          case 0x08: /*DEC l*/
              if (cpu_mod != 3) {
@@ -738,8 +835,34 @@ index 8b9711aaa..e5bbe2efe 100644
      if (cpu_mod != 3)
          SEG_CHECK_WRITE(cpu_state.ea_seg);
      temp = geteab();
+diff --git a/src/cpu/x86_ops_int.h b/src/cpu/x86_ops_int.h
+index 11aa4d0a4..ab30c2dd3 100644
+--- a/src/cpu/x86_ops_int.h
++++ b/src/cpu/x86_ops_int.h
+@@ -22,11 +22,16 @@ opINT1(UNUSED(uint32_t fetchdat))
+ {
+     int cycles_old = cycles;
+     UN_USED(cycles_old);
+-    if ((cr0 & 1) && (cpu_state.eflags & VM_FLAG) && (IOPL != 3)) {
+-        x86gpf(NULL, 0);
+-        return 1;
+-    }
+-    x86_int_sw(1);
++    /* 86box-486: ICEBP is INT 1 as an event (SDM INT1, Bochs): no IOPL check in V86,
++       no gate DPL check, EXT set in error codes; the return address is the next
++       instruction, DR6 is unchanged */
++    if (msw & 1) {
++        flags_rebuild();
++        pmodeint(1, 0);
++        trap &= ~1;         /* (as x86_int_sw: no single-step trap after it) */
++        CPU_BLOCK_END();
++    } else
++        x86_int_sw(1);
+     CLOCK_CYCLES((is486) ? 44 : 59);
+     PREFETCH_RUN(cycles_old - cycles, 1, -1, 0, 0, 0, 0, 0);
+     return 1;
 diff --git a/src/cpu/x86_ops_misc.h b/src/cpu/x86_ops_misc.h
-index 639c2c029..607b3621c 100644
+index 639c2c029..e92846383 100644
 --- a/src/cpu/x86_ops_misc.h
 +++ b/src/cpu/x86_ops_misc.h
 @@ -63,7 +63,10 @@ opF6_a16(uint32_t fetchdat)
@@ -852,6 +975,19 @@ index 639c2c029..607b3621c 100644
      if (cpu_state.abrt)
          return 1;
  
+@@ -953,6 +983,12 @@ set_segment_limit(x86seg *s, uint8_t segdat3)
+     } else {
+         s->limit_high = (segdat3 & 0x40) ? 0xffffffff : 0xffff;
+         s->limit_low  = s->limit + 1;
++        /* 86box-486: an expand-down segment whose limit is at or above its top
++           (FFFF / FFFFFFFF) has no valid offset (limit + 1 would wrap to 0) */
++        if (s->limit >= s->limit_high) {
++            s->limit_low  = 0xffffffff;
++            s->limit_high = 0;
++        }
+     }
+     cpu_mark_64k_status(s);
+ }
 diff --git a/src/cpu/x86_ops_mov.h b/src/cpu/x86_ops_mov.h
 index 787a727d3..09963cbfd 100644
 --- a/src/cpu/x86_ops_mov.h
@@ -1048,6 +1184,118 @@ index 2b221d79c..cd152949d 100644
      if ((CPL || (cpu_state.eflags & VM_FLAG)) && (cr0 & 1)) {
          x86gpf(NULL, 0);
          return 1;
+diff --git a/src/cpu/x86_ops_mov_seg.h b/src/cpu/x86_ops_mov_seg.h
+index c802a7446..4487d21f4 100644
+--- a/src/cpu/x86_ops_mov_seg.h
++++ b/src/cpu/x86_ops_mov_seg.h
+@@ -306,11 +306,15 @@ opLDS_w_a16(uint32_t fetchdat)
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
+     addr = readmemw(easeg, cpu_state.eaaddr);
+     if (cpu_state.abrt)
+         return 1;
+-    seg = readmemw(easeg, cpu_state.eaaddr + 2);
++    /* (Tetrium lockstep: 16-bit address, the second part at (EA + 2) mod 64K, each part limit-checked: 386EX) */
++    if (cpu_state.abrt)
++        return 1;
++    CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 2) & 0xffff), ((cpu_state.eaaddr + 2) & 0xffff) + 1);
++    seg = readmemw(easeg, ((cpu_state.eaaddr + 2) & 0xffff));
+     if (cpu_state.abrt)
+         return 1;
+     op_loadseg(seg, &cpu_state.seg_ds);
+@@ -354,11 +358,15 @@ opLDS_l_a16(uint32_t fetchdat)
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
+     addr = readmeml(easeg, cpu_state.eaaddr);
+     if (cpu_state.abrt)
+         return 1;
+-    seg = readmemw(easeg, cpu_state.eaaddr + 4);
++    /* (Tetrium lockstep: 16-bit address, the second part at (EA + 4) mod 64K, each part limit-checked: 386EX) */
++    if (cpu_state.abrt)
++        return 1;
++    CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 4) & 0xffff), ((cpu_state.eaaddr + 4) & 0xffff) + 1);
++    seg = readmemw(easeg, ((cpu_state.eaaddr + 4) & 0xffff));
+     if (cpu_state.abrt)
+         return 1;
+     op_loadseg(seg, &cpu_state.seg_ds);
+@@ -403,11 +411,15 @@ opLSS_w_a16(uint32_t fetchdat)
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
+     addr = readmemw(easeg, cpu_state.eaaddr);
+     if (cpu_state.abrt)
+         return 1;
+-    seg = readmemw(easeg, cpu_state.eaaddr + 2);
++    /* (Tetrium lockstep: 16-bit address, the second part at (EA + 2) mod 64K, each part limit-checked: 386EX) */
++    if (cpu_state.abrt)
++        return 1;
++    CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 2) & 0xffff), ((cpu_state.eaaddr + 2) & 0xffff) + 1);
++    seg = readmemw(easeg, ((cpu_state.eaaddr + 2) & 0xffff));
+     if (cpu_state.abrt)
+         return 1;
+     op_loadseg(seg, &cpu_state.seg_ss);
+@@ -451,11 +463,15 @@ opLSS_l_a16(uint32_t fetchdat)
+     fetch_ea_16(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
+     addr = readmeml(easeg, cpu_state.eaaddr);
+     if (cpu_state.abrt)
+         return 1;
+-    seg = readmemw(easeg, cpu_state.eaaddr + 4);
++    /* (Tetrium lockstep: 16-bit address, the second part at (EA + 4) mod 64K, each part limit-checked: 386EX) */
++    if (cpu_state.abrt)
++        return 1;
++    CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 4) & 0xffff), ((cpu_state.eaaddr + 4) & 0xffff) + 1);
++    seg = readmemw(easeg, ((cpu_state.eaaddr + 4) & 0xffff));
+     if (cpu_state.abrt)
+         return 1;
+     op_loadseg(seg, &cpu_state.seg_ss);
+@@ -499,11 +515,15 @@ opLSS_l_a32(uint32_t fetchdat)
+         fetch_ea_16(fetchdat);                                                \
+         SEG_CHECK_READ(cpu_state.ea_seg);                                     \
+         ILLEGAL_ON(cpu_mod == 3);                                             \
+-        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3); \
++        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1); \
+         addr = readmemw(easeg, cpu_state.eaaddr);                           \
+         if (cpu_state.abrt)                                                   \
+             return 1;                                                         \
+-        seg  = readmemw(easeg, cpu_state.eaaddr + 2);                           \
++        /* (Tetrium lockstep: 16-bit address, the second part at (EA + 2) mod 64K, each part limit-checked: 386EX) */ \
++        if (cpu_state.abrt) \
++            return 1; \
++        CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 2) & 0xffff), ((cpu_state.eaaddr + 2) & 0xffff) + 1); \
++        seg  = readmemw(easeg, ((cpu_state.eaaddr + 2) & 0xffff));                           \
+         if (cpu_state.abrt)                                                   \
+             return 1;                                                         \
+         op_loadseg(seg, &sel);                                                \
+@@ -546,11 +566,15 @@ opLSS_l_a32(uint32_t fetchdat)
+         fetch_ea_16(fetchdat);                                                \
+         SEG_CHECK_READ(cpu_state.ea_seg);                                     \
+         ILLEGAL_ON(cpu_mod == 3);                                             \
+-        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5); \
++        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3); \
+         addr = readmeml(easeg, cpu_state.eaaddr);                           \
+         if (cpu_state.abrt)                                                   \
+             return 1;                                                         \
+-        seg  = readmemw(easeg, cpu_state.eaaddr + 4);                           \
++        /* (Tetrium lockstep: 16-bit address, the second part at (EA + 4) mod 64K, each part limit-checked: 386EX) */ \
++        if (cpu_state.abrt) \
++            return 1; \
++        CHECK_READ(cpu_state.ea_seg, ((cpu_state.eaaddr + 4) & 0xffff), ((cpu_state.eaaddr + 4) & 0xffff) + 1); \
++        seg  = readmemw(easeg, ((cpu_state.eaaddr + 4) & 0xffff));                           \
+         if (cpu_state.abrt)                                                   \
+             return 1;                                                         \
+         op_loadseg(seg, &sel);                                                \
 diff --git a/src/cpu/x86_ops_pmode.h b/src/cpu/x86_ops_pmode.h
 index 29d45f562..a6daf8619 100644
 --- a/src/cpu/x86_ops_pmode.h
@@ -1455,23 +1703,32 @@ index 03808299d..e6bbf842d 100644
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
 diff --git a/src/cpu/x86_ops_ret.h b/src/cpu/x86_ops_ret.h
-index 4bd8f8dda..5c4bbe8fe 100644
+index 4bd8f8dda..72d5586d1 100644
 --- a/src/cpu/x86_ops_ret.h
 +++ b/src/cpu/x86_ops_ret.h
-@@ -3,13 +3,18 @@
+@@ -3,13 +3,27 @@
          op_pmoderetf(0, stack_offset);                \
          return 1;                                     \
      }                                                 \
 +    uint32_t n_pc, n_cs;                              \
++    /* (Tetrium lockstep: each pop within the SS limit first, #SS(0)) */ \
      if (stack32) {                                    \
 -        cpu_state.pc = readmemw(ss, ESP);             \
 -        op_loadcs(readmemw(ss, ESP + 2));             \
++        CHECK_READ(&cpu_state.seg_ss, ESP, ESP + 1);  \
 +        n_pc = readmemw(ss, ESP);                     \
++        if (cpu_state.abrt)                           \
++            return 1;                                 \
++        CHECK_READ(&cpu_state.seg_ss, ESP + 2, ESP + 3); \
 +        n_cs = readmemw(ss, ESP + 2);         \
      } else {                                          \
 -        cpu_state.pc = readmemw(ss, SP);              \
 -        op_loadcs(readmemw(ss, (SP + 2) & 0xffff));   \
++        CHECK_READ(&cpu_state.seg_ss, SP, SP + 1);    \
 +        n_pc = readmemw(ss, SP);                      \
++        if (cpu_state.abrt)                           \
++            return 1;                                 \
++        CHECK_READ(&cpu_state.seg_ss, (SP + 2) & 0xffff, ((SP + 2) & 0xffff) + 1); \
 +        n_cs = readmemw(ss, (SP + 2) & 0xffff); \
      }                                                 \
 +    if (cpu_state.abrt)                               \
@@ -1481,21 +1738,30 @@ index 4bd8f8dda..5c4bbe8fe 100644
      if (cpu_state.abrt)                               \
          return 1;                                     \
      if (stack32)                                      \
-@@ -23,13 +28,18 @@
+@@ -23,13 +37,27 @@
          op_pmoderetf(1, stack_offset);                \
          return 1;                                     \
      }                                                 \
 +    uint32_t n_pc, n_cs;                              \
++    /* (Tetrium lockstep: each pop within the SS limit first, #SS(0); SP wraps) */ \
      if (stack32) {                                    \
 -        cpu_state.pc = readmeml(ss, ESP);             \
 -        op_loadcs(readmeml(ss, ESP + 4) & 0xffff);    \
++        CHECK_READ(&cpu_state.seg_ss, ESP, ESP + 3);  \
 +        n_pc = readmeml(ss, ESP);                     \
++        if (cpu_state.abrt)                           \
++            return 1;                                 \
++        CHECK_READ(&cpu_state.seg_ss, ESP + 4, ESP + 7); \
 +        n_cs = readmeml(ss, ESP + 4) & 0xffff;         \
      } else {                                          \
 -        cpu_state.pc = readmeml(ss, SP);              \
 -        op_loadcs(readmeml(ss, SP + 4) & 0xffff);     \
++        CHECK_READ(&cpu_state.seg_ss, SP, SP + 3);    \
 +        n_pc = readmeml(ss, SP);                      \
-+        n_cs = readmeml(ss, SP + 4) & 0xffff; \
++        if (cpu_state.abrt)                           \
++            return 1;                                 \
++        CHECK_READ(&cpu_state.seg_ss, (SP + 4) & 0xffff, ((SP + 4) & 0xffff) + 3); \
++        n_cs = readmeml(ss, (SP + 4) & 0xffff) & 0xffff; \
      }                                                 \
 +    if (cpu_state.abrt)                               \
 +        return 1;   /* (a #PF: CS:EIP stay) */        \
@@ -1504,8 +1770,111 @@ index 4bd8f8dda..5c4bbe8fe 100644
      if (cpu_state.abrt)                               \
          return 1;                                     \
      if (stack32)                                      \
+@@ -113,7 +141,7 @@ opIRET_186(UNUSED(uint32_t fetchdat))
+         if (stack32) {
+             cpu_state.pc    = readmemw(ss, ESP);
+             new_cs          = readmemw(ss, ESP + 2);
+-            cpu_state.flags = (cpu_state.flags & 0x7000) | (readmemw(ss, ESP + 4) & 0xffd5) | 2;
++            cpu_state.flags = (cpu_state.flags & 0x7000) | (readmemw(ss, ESP + 4) & 0x7fd5) | 2;
+             ESP += 6;
+         } else {
+             cpu_state.pc    = readmemw(ss, SP);
+@@ -153,7 +181,7 @@ opIRET_286(UNUSED(uint32_t fetchdat))
+         if (stack32) {
+             cpu_state.pc    = readmemw(ss, ESP);
+             new_cs          = readmemw(ss, ESP + 2);
+-            cpu_state.flags = (cpu_state.flags & 0x7000) | (readmemw(ss, ESP + 4) & 0xffd5) | 2;
++            cpu_state.flags = (cpu_state.flags & 0x7000) | (readmemw(ss, ESP + 4) & 0x7fd5) | 2;
+             ESP += 6;
+         } else {
+             cpu_state.pc    = readmemw(ss, SP);
+@@ -216,18 +244,30 @@ opIRET(UNUSED(uint32_t fetchdat))
+             op_pmodeiret(0);
+             optype = 0;
+         } else {
+-            uint16_t new_cs;
+-            if (stack32) {
+-                cpu_state.pc    = readmemw(ss, ESP);
+-                new_cs          = readmemw(ss, ESP + 2);
+-                cpu_state.flags = (readmemw(ss, ESP + 4) & 0xffd5) | 2;
++            uint16_t new_cs, new_pc, new_fl;
++            /* (Tetrium lockstep: each pop within the SS limit first, #SS(0); nothing changes
++               on a fault) */
++            uint32_t o0 = stack32 ? ESP : SP;
++            uint32_t o1 = stack32 ? (ESP + 2) : ((SP + 2) & 0xffff);
++            uint32_t o2 = stack32 ? (ESP + 4) : ((SP + 4) & 0xffff);
++            CHECK_READ(&cpu_state.seg_ss, o0, o0 + 1);
++            new_pc = readmemw(ss, o0);
++            if (cpu_state.abrt)
++                return 1;
++            CHECK_READ(&cpu_state.seg_ss, o1, o1 + 1);
++            new_cs = readmemw(ss, o1);
++            if (cpu_state.abrt)
++                return 1;
++            CHECK_READ(&cpu_state.seg_ss, o2, o2 + 1);
++            new_fl = readmemw(ss, o2);
++            if (cpu_state.abrt)
++                return 1;
++            cpu_state.pc    = new_pc;
++            cpu_state.flags = (new_fl & 0x7fd5) | 2;
++            if (stack32)
+                 ESP += 6;
+-            } else {
+-                cpu_state.pc    = readmemw(ss, SP);
+-                new_cs          = readmemw(ss, ((SP + 2) & 0xffff));
+-                cpu_state.flags = (readmemw(ss, ((SP + 4) & 0xffff)) & 0xffd5) | 2;
++            else
+                 SP += 6;
+-            }
+             op_loadcs(new_cs);
+             cycles -= timing_iret_rm;
+         }
+@@ -257,20 +297,32 @@ opIRETD(UNUSED(uint32_t fetchdat))
+         op_pmodeiret(1);
+         optype = 0;
+     } else {
++        uint32_t new_pc, new_fl;
+         uint16_t new_cs;
+-        if (stack32) {
+-            cpu_state.pc     = readmeml(ss, ESP);
+-            new_cs           = readmemw(ss, ESP + 4);
+-            cpu_state.flags  = (readmemw(ss, ESP + 8) & 0xffd5) | 2;
+-            cpu_state.eflags = readmemw(ss, ESP + 10) & cpu_eflags_implemented();
++        /* (Tetrium lockstep: each dword pop within the SS limit first, #SS(0); nothing
++           changes on a fault) */
++        uint32_t o0 = stack32 ? ESP : SP;
++        uint32_t o1 = stack32 ? (ESP + 4) : ((SP + 4) & 0xffff);
++        uint32_t o2 = stack32 ? (ESP + 8) : ((SP + 8) & 0xffff);
++        CHECK_READ(&cpu_state.seg_ss, o0, o0 + 3);
++        new_pc = readmeml(ss, o0);
++        if (cpu_state.abrt)
++            return 1;
++        CHECK_READ(&cpu_state.seg_ss, o1, o1 + 3);
++        new_cs = readmemw(ss, o1);
++        if (cpu_state.abrt)
++            return 1;
++        CHECK_READ(&cpu_state.seg_ss, o2, o2 + 3);
++        new_fl = readmeml(ss, o2);
++        if (cpu_state.abrt)
++            return 1;
++        cpu_state.pc     = new_pc;
++        cpu_state.flags  = (new_fl & 0x7fd5) | 2;
++        cpu_state.eflags = (new_fl >> 16) & cpu_eflags_implemented();
++        if (stack32)
+             ESP += 12;
+-        } else {
+-            cpu_state.pc     = readmeml(ss, SP);
+-            new_cs           = readmemw(ss, ((SP + 4) & 0xffff));
+-            cpu_state.flags  = (readmemw(ss, (SP + 8) & 0xffff) & 0xffd5) | 2;
+-            cpu_state.eflags = readmemw(ss, (SP + 10) & 0xffff) & cpu_eflags_implemented();
++        else
+             SP += 12;
+-        }
+         op_loadcs(new_cs);
+         cycles -= timing_iret_rm;
+     }
 diff --git a/src/cpu/x86_ops_stack.h b/src/cpu/x86_ops_stack.h
-index 183ddebc4..6936b0d05 100644
+index 183ddebc4..51d3743f3 100644
 --- a/src/cpu/x86_ops_stack.h
 +++ b/src/cpu/x86_ops_stack.h
 @@ -76,28 +76,54 @@ POP_L_OP(EDI)
@@ -1983,7 +2352,7 @@ index 183ddebc4..6936b0d05 100644
  {
      uint32_t temp;
  
-@@ -415,6 +618,17 @@ opPOPL_a32(uint32_t fetchdat)
+@@ -415,6 +618,31 @@ opPOPL_a32(uint32_t fetchdat)
      PREFETCH_RUN((cpu_mod == 3) ? 4 : 5, 2, rmdat, 0, 1, 0, (cpu_mod == 3) ? 0 : 1, 1);
      return cpu_state.abrt;
  }
@@ -1998,10 +2367,37 @@ index 183ddebc4..6936b0d05 100644
 +        ESP = esp0;
 +    return ret;
 +}
++
++#ifndef ENTER_RD_BAD
++#    define ENTER_RD_BAD
++/* 86box-486: a read of n bytes at offset a of SS is inside its limit (#SS(0) if not) */
++static __inline int
++enter_rd_bad(uint32_t a, int n)
++{
++    if ((a < cpu_state.seg_ss.limit_low) || ((uint64_t) a + n - 1 > cpu_state.seg_ss.limit_high)) {
++        x86ss(NULL, 0);
++        return 1;
++    }
++    return 0;
++}
++#endif
  
  static int
  opENTER_w(uint32_t fetchdat)
-@@ -480,6 +694,23 @@ opENTER_w(uint32_t fetchdat)
+@@ -449,6 +677,12 @@ opENTER_w(uint32_t fetchdat)
+                 EBP -= 2;
+             else
+                 BP -= 2;
++            /* 86box-486: the old frame's pointers are stack reads, limit-checked (#SS(0)) */
++            if (enter_rd_bad(stack32 ? EBP : BP, 2)) {
++                ESP = tempESP;
++                EBP = tempEBP;
++                return 1;
++            }
+             tempw = readmemw(ss, stack32 ? EBP : BP);
+             if (cpu_state.abrt) {
+                 ESP = tempESP;
+@@ -480,6 +714,30 @@ opENTER_w(uint32_t fetchdat)
          instr_cycles += (is486) ? 3 : 5;
  #endif
      }
@@ -2013,6 +2409,13 @@ index 183ddebc4..6936b0d05 100644
 +        ESP = tempESP;
 +        EBP = tempEBP;
 +        CHECK_WRITE(&cpu_state.seg_ss, fsp, fsp + 1);
++        /* 86box-486: the check-write is a reference for the alignment check too: #AC(0)
++           before the translation (Bochs: tickle_write) */
++        if (((ss + fsp) & 1) && (cr0 & 0x40000) && (cpu_state.eflags & AC_FLAG) && (CPL == 3) && is486) {
++            cpu_state.abrt = 0x11;
++            abrt_error     = 0;
++            return 1;
++        }
 +        if (cr0 >> 31) {
 +            (void) mmutranslatereal(ss + fsp, 1);
 +            if (!cpu_state.abrt && ((fsp & 0xfff) > 0xfff - 1))
@@ -2025,7 +2428,7 @@ index 183ddebc4..6936b0d05 100644
      /* The operand size picks BP or EBP for the frame (the current SDM's
         ENTER, and Bochs; the 1999 book had the stack size pick it) */
      BP = frame_ptr;
-@@ -519,8 +750,10 @@ opENTER_l(uint32_t fetchdat)
+@@ -519,8 +777,10 @@ opENTER_l(uint32_t fetchdat)
      PUSH_L(EBP);
      if (cpu_state.abrt)
          return 1;
@@ -2038,7 +2441,20 @@ index 183ddebc4..6936b0d05 100644
  
      if (count > 0) {
          while (--count) {
-@@ -561,6 +794,23 @@ opENTER_l(uint32_t fetchdat)
+@@ -528,6 +788,12 @@ opENTER_l(uint32_t fetchdat)
+                 EBP -= 4;
+             else
+                 BP -= 4;
++            /* 86box-486: the old frame's pointers are stack reads, limit-checked (#SS(0)) */
++            if (enter_rd_bad(stack32 ? EBP : BP, 4)) {
++                ESP = tempESP;
++                EBP = tempEBP;
++                return 1;
++            }
+             templ = readmeml(ss, stack32 ? EBP : BP);
+             if (cpu_state.abrt) {
+                 ESP = tempESP;
+@@ -561,6 +827,30 @@ opENTER_l(uint32_t fetchdat)
      }
      /* The operand size picks BP or EBP for the frame (the current SDM's
         ENTER, and Bochs; the 1999 book had the stack size pick it) */
@@ -2050,6 +2466,13 @@ index 183ddebc4..6936b0d05 100644
 +        ESP = tempESP;
 +        EBP = tempEBP;
 +        CHECK_WRITE(&cpu_state.seg_ss, fsp, fsp + 3);
++        /* 86box-486: the check-write is a reference for the alignment check too: #AC(0)
++           before the translation (Bochs: tickle_write) */
++        if (((ss + fsp) & 3) && (cr0 & 0x40000) && (cpu_state.eflags & AC_FLAG) && (CPL == 3) && is486) {
++            cpu_state.abrt = 0x11;
++            abrt_error     = 0;
++            return 1;
++        }
 +        if (cr0 >> 31) {
 +            (void) mmutranslatereal(ss + fsp, 1);
 +            if (!cpu_state.abrt && ((fsp & 0xfff) > 0xfff - 3))
@@ -2151,7 +2574,7 @@ index 640b08a4d..e6858e21e 100644
      temp = readmeml_n(cpu_state.ea_seg->base, ESI, addr64a);
      outl(DX, temp);
 diff --git a/src/cpu/x86seg.c b/src/cpu/x86seg.c
-index a0db998d4..061b4fa97 100644
+index a0db998d4..1c818bb31 100644
 --- a/src/cpu/x86seg.c
 +++ b/src/cpu/x86seg.c
 @@ -92,6 +92,20 @@ x86seg_set_accessed(uint32_t addr, uint16_t word4)
@@ -2175,7 +2598,28 @@ index a0db998d4..061b4fa97 100644
  /* A TSS descriptor's Busy bit (the access byte's bit 1), set or cleared by
     a task switch (19.1.2). Answers 0 on a fault. */
  static int
-@@ -181,22 +195,14 @@ x86_doabrt(int x86_abrt)
+@@ -144,6 +158,20 @@ null_data_seg(x86seg *s)
+         cpu_cur_status |= CPU_STATUS_NOTFLATES;
+ }
+ 
++/* 86box-486: n pushes of sz bytes fit the current stack segment (#SS(0) if not) */
++static int
++int_frame_fits(int sz, int n)
++{
++    for (int k = 1; k <= n; k++) {
++        uint32_t a = stack32 ? (ESP - k * sz) : ((SP - k * sz) & 0xffff);
++        if ((a < cpu_state.seg_ss.limit_low) || ((uint64_t) a + sz - 1 > cpu_state.seg_ss.limit_high)) {
++            x86ss(NULL, 0);
++            return 0;
++        }
++    }
++    return 1;
++}
++
+ /* An exception's error code, sized by the gate it was delivered through, or
+    for a task gate by the target TSS (pmodeint) */
+ static void
+@@ -181,22 +209,14 @@ x86_doabrt(int x86_abrt)
  
      task_eip_pending = 0;
      if (msw & 1) {
@@ -2201,7 +2645,20 @@ index a0db998d4..061b4fa97 100644
  
          cpu_state.flags &= ~(I_FLAG | T_FLAG);
          cpu_state.pc = readmemw(0, addr);
-@@ -816,6 +822,10 @@ loadcsjmp(uint16_t seg, uint32_t old_pc)
+@@ -296,6 +316,12 @@ do_seg_load(x86seg *s, uint16_t *segdat)
+     } else {
+         s->limit_high = (word3 & 0x40) ? 0xffffffff : 0xffff;
+         s->limit_low  = s->limit + 1;
++        /* 86box-486: an expand-down segment whose limit is at or above its top
++           (FFFF / FFFFFFFF) has no valid offset (limit + 1 would wrap to 0) */
++        if (s->limit >= s->limit_high) {
++            s->limit_low  = 0xffffffff;
++            s->limit_high = 0;
++        }
+     }
+ 
+     if (s == &cpu_state.seg_ds) {
+@@ -816,6 +842,10 @@ loadcsjmp(uint16_t seg, uint32_t old_pc)
                          x86gpf("loadcsjmp(): ex DPL > CPL", seg2 & 0xfffc);
                          return;
                      }
@@ -2212,7 +2669,46 @@ index a0db998d4..061b4fa97 100644
                      if (!(segdat[2] & 0x8000)) {
                          x86np("Load CS JMP from call gate not present", seg2 & 0xfffc);
                          return;
-@@ -997,6 +1007,11 @@ POPL(void)
+@@ -954,10 +984,29 @@ PUSHL_SEL(uint32_t v)
+     }
+ }
+ 
++/* Tetrium lockstep: a pop is checked against the SS limit (#SS(0)) before it is read, as on a
++   486 ("top n bytes of stack not within stack limits", SDM IRET / RET); after a fault the later
++   pops of the same instruction do nothing (the first fault stands) */
++static inline int
++pop_lim_bad(uint32_t n)
++{
++    uint32_t o = stack32 ? ESP : SP;
++    uint32_t e = o + n - 1;
++    if (cpu_state.abrt)
++        return 1;
++    if ((o < cpu_state.seg_ss.limit_low) || (e > cpu_state.seg_ss.limit_high) || (e < o)) {
++        x86ss(NULL, 0);
++        return 1;
++    }
++    return 0;
++}
++
+ static inline uint16_t
+ POPW(void)
+ {
+     uint16_t tempw;
++    if (pop_lim_bad(2))
++        return 0;
+     if (stack32) {
+         tempw = readmemw(ss, ESP);
+         if (cpu_state.abrt)
+@@ -981,6 +1030,8 @@ POPL(void)
+         templ = POPW();
+         templ |= (POPW() << 16);
+     } else {
++        if (pop_lim_bad(4))
++            return 0;
+         if (stack32) {
+             templ = readmeml(ss, ESP);
+             if (cpu_state.abrt)
+@@ -997,6 +1048,11 @@ POPL(void)
      return templ;
  }
  
@@ -2224,7 +2720,7 @@ index a0db998d4..061b4fa97 100644
  #ifdef OPS_286_386
  void
  loadcscall_2386(uint16_t seg, uint32_t old_pc)
-@@ -1139,6 +1154,10 @@ loadcscall(uint16_t seg, uint32_t old_pc)
+@@ -1139,6 +1195,10 @@ loadcscall(uint16_t seg, uint32_t old_pc)
                          x86gpf("loadcscall(): ex DPL > CPL", seg2 & 0xfffc);
                          return;
                      }
@@ -2235,7 +2731,7 @@ index a0db998d4..061b4fa97 100644
                      if (!(segdat[2] & 0x8000)) {
                          x86seg_log("Call gate CS not present %04X\n", seg2);
                          x86np("Call gate CS not present", seg2 & 0xfffc);
-@@ -1152,6 +1171,10 @@ loadcscall(uint16_t seg, uint32_t old_pc)
+@@ -1152,6 +1212,10 @@ loadcscall(uint16_t seg, uint32_t old_pc)
                          case 0x1b00: /* Non-conforming code */
                              if (DPL < CPL) {
                                  uint16_t oldcs = CS;
@@ -2246,7 +2742,7 @@ index a0db998d4..061b4fa97 100644
                                  oaddr = addr;
                                  /* Load new stack */
                                  oldss = SS;
-@@ -1242,9 +1265,14 @@ loadcscall(uint16_t seg, uint32_t old_pc)
+@@ -1242,9 +1306,14 @@ loadcscall(uint16_t seg, uint32_t old_pc)
                                      is586 ? PUSHL(oldss) : PUSHL_SEL(oldss);
                                      PUSHL(oldsp2);
                                      if (cpu_state.abrt) {
@@ -2263,7 +2759,7 @@ index a0db998d4..061b4fa97 100644
                                          return;
                                      }
                                      if (count) {
-@@ -1255,29 +1283,34 @@ loadcscall(uint16_t seg, uint32_t old_pc)
+@@ -1255,29 +1324,34 @@ loadcscall(uint16_t seg, uint32_t old_pc)
                                                  case 3:
                                                      /* We are at least an entire DWORD away from the limit,
                                                         read long. */
@@ -2305,7 +2801,7 @@ index a0db998d4..061b4fa97 100644
                                                  return;
                                              }
                                          }
-@@ -1288,32 +1321,42 @@ loadcscall(uint16_t seg, uint32_t old_pc)
+@@ -1288,32 +1362,42 @@ loadcscall(uint16_t seg, uint32_t old_pc)
                                      x86seg_log("Write SS to %04X:%04X\n", SS, SP);
                                      PUSHW(oldsp2);
                                      if (cpu_state.abrt) {
@@ -2355,7 +2851,7 @@ index a0db998d4..061b4fa97 100644
                                                  return;
                                              }
                                          }
-@@ -1759,6 +1802,10 @@ pmodeint(int num, int soft)
+@@ -1759,6 +1843,10 @@ pmodeint(int num, int soft)
                              x86gpf("pmodeint(): Interrupt or trap gate non-zero DPL in V86 mode", (segdat[1] & 0xfffc) + !soft);
                              return;
                          }
@@ -2366,7 +2862,7 @@ index a0db998d4..061b4fa97 100644
                          /* Load new stack */
                          oldss        = SS;
                          oldsp        = ESP;
-@@ -1859,6 +1906,21 @@ pmodeint(int num, int soft)
+@@ -1859,6 +1947,21 @@ pmodeint(int num, int soft)
                              if (cpu_state.abrt)
                                  return;
                          } else {
@@ -2388,7 +2884,7 @@ index a0db998d4..061b4fa97 100644
                              PUSHW(oldss);
                              PUSHW(oldsp);
                              PUSHW(cpu_state.flags);
-@@ -1891,6 +1953,10 @@ pmodeint(int num, int soft)
+@@ -1891,6 +1994,15 @@ pmodeint(int num, int soft)
                          x86gpf("pmodeint(): conforming or same-level CS in V86 mode", (seg & 0xfffc) + !soft);
                          return;
                      }
@@ -2396,10 +2892,15 @@ index a0db998d4..061b4fa97 100644
 +                        x86gpf("pmodeint(): gate EIP beyond the CS limit", !soft);
 +                        return;
 +                    }
++                    /* 86box-486: the frame (and the error code that follows) must fit the
++                       stack segment, else #SS(0) with nothing pushed (80386: "current stack
++                       limits must allow pushing ...") */
++                    if (!int_frame_fits((type > 0x0800) ? 4 : 2, 3 + task_error_follows))
++                        return;
                      if (type > 0x0800) {
                          PUSHL(cpu_state.flags | (cpu_state.eflags << 16));
                          is586 ? PUSHL(CS) : PUSHL_SEL(CS);
-@@ -1926,7 +1992,7 @@ pmodeint(int num, int soft)
+@@ -1926,7 +2038,7 @@ pmodeint(int num, int soft)
              x86seg_set_accessed(oaddr, segdat2[2]); /* Set accessed bit */
              cpl_override = 0;
  
@@ -2408,17 +2909,50 @@ index a0db998d4..061b4fa97 100644
              cpu_cur_status &= ~CPU_STATUS_V86;
              if (!(type & 0x100))
                  cpu_state.flags &= ~I_FLAG;
-@@ -2851,7 +2917,8 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
+@@ -2035,7 +2147,7 @@ pmodeiret(int is32)
+         cpu_state.seg_cs.ar_high = 0x10;
+         cpu_state.seg_cs.checked = 1;
+         CS                       = seg;
+-        cpu_state.flags          = (cpu_state.flags & 0x3000) | (tempflags & 0xcfd5) | 2;
++        cpu_state.flags          = (cpu_state.flags & 0x3000) | (tempflags & 0x4fd5) | 2;
+         /* IRETD in V86 mode loads all but VM, IOPL, VIP and VIF */
+         if (is32)
+             cpu_state.eflags = (cpu_state.eflags & (VM_FLAG | VIF_FLAG | VIP_FLAG)) |
+@@ -2142,7 +2254,7 @@ pmodeiret(int is32)
+             cpu_update_64k_status();
+             use32 = 0;
+             cpu_cur_status &= ~CPU_STATUS_USE32;
+-            cpu_state.flags = (tempflags & 0xffd5) | 2;
++            cpu_state.flags = (tempflags & 0x7fd5) | 2;
+             cycles -= timing_iret_v86;
+             return;
+         }
+@@ -2320,7 +2432,7 @@ pmodeiret(int is32)
+         cycles -= timing_iret_pm_outer;
+     }
+     cpu_state.pc    = newpc;
+-    cpu_state.flags = (cpu_state.flags & ~flagmask) | (tempflags & flagmask & 0xffd5) | 2;
++    cpu_state.flags = (cpu_state.flags & ~flagmask) | (tempflags & flagmask & 0x7fd5) | 2;
+     if (is32)
+         cpu_state.eflags = (cpu_state.eflags & (uint16_t) ~eflagmask) |
+                            ((tempflags >> 16) & eflagmask);
+@@ -2847,11 +2959,12 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
+     cpu_state.pc    = img.pc;
+     cpu_state.oldpc = img.pc;
+     if (is32) {
+-        cpu_state.flags  = img.flags;
++        cpu_state.flags  = (img.flags & 0x7fd5) | 2;   /* (reserved bits 1, 3, 5, 15: as on a 486) */
          cpu_state.eflags = img.flags >> 16;
      } else {
-         cpu_state.flags = img.flags;
+-        cpu_state.flags = img.flags;
 -        cpu_state.eflags &= ~VM_FLAG; /* a 16-bit TSS has no VM */
++        cpu_state.flags = (img.flags & 0x7fd5) | 2;
 +        cpu_state.eflags = 0;   /* Tetrium lockstep: a 16-bit TSS clears the upper EFLAGS word (VM, and
 +                                   RF / AC / ID as on a 486 and in Bochs; RF is set while a fault is delivered) */
      }
      cpu_386_flags_extract();
      for (int i = 0; i < 8; i++)
-@@ -2893,6 +2960,7 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
+@@ -2893,6 +3006,7 @@ taskswitch286(uint16_t seg, uint16_t *segdat, int is32)
          cr3 = img.cr3;
          pae_load_pdptes(); /* used only with PAE paging */
          flushmmucache();

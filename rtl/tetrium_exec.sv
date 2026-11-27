@@ -808,6 +808,10 @@ module tetrium_exec #(
   always_ff @(posedge clk) ffbm <= n_ibm & ib_en;
   wire ffbp     = |ffbm && !rf && !ssp_q;
   wire ff_db    = ff_take && ffbp;
+  // the faulting fetch is beyond the code segment limit (an instruction running past it, e.g.
+  // past FFFF in real / V86 mode): #GP(0), not the #PF (the 486 checks the limit before
+  // paging)
+  wire ffgp     = ((ff_lin - cs_base) > cs_lim);
   // crossing into the next page: load (size msz) / store (size sz)
   // (the needs are registered at E entry: they feed the stall network)
   wire        lcross = lcross_q;
@@ -822,7 +826,7 @@ module tetrium_exec #(
   logic       pf_q;                             // a walk failed: #PF
   logic [2:0] pf_err;
   logic [31:0] pf_cr2;
-  logic       s_ev, s_will;                     // store steps evaluated / the uop stores
+  logic       s_ev, s_will;                     // store steps evaluated / the store is translated
   // (a static check fault (chk_flt) stops the translation: the walk is not requested,
   // the hold drops one cycle later)
   // translation steps still needed, kept in a register (it feeds the stall network):
@@ -864,15 +868,21 @@ module tetrium_exec #(
   assign e_lpp_ld = e_pdone && w_ok && (!tstep[1] || (wrk == WR_PRI));
   assign e_lps_ld = e_pdone && w_ok && tstep[1] && (wrk == WR_SEC);
   // the uop stores (evaluated once the load data is final)
-  wire        st_will = wr_en && !fault_x && ((eop == E_PROBE) ||
+  // (st_keep: the push of a far CALL whose target is beyond the limit, fcall_st)
+  wire        st_keep = fcall_st && !fault_ni;
+  wire        st_will = wr_en && (!fault_x || st_keep) && ((eop == E_PROBE) ||
                         (!st_sup && !sup_d && !((eop == E_SHIFT || eop == E_SHXD) && shb && sh_z)));
+  // the store is translated: also the push of a CALL whose target is beyond the CS limit,
+  // so that the push's #PF comes before that #GP (the 486 pushes, then transfers); it
+  // stores nothing
+  wire        st_tr   = st_will || (wr_en && (wrk == WR_SEC) && ipflt_x && !fault_ni && !st_sup && !sup_d);
   always_ff @(posedge clk) begin
     if (rst || flush_r || !hold_e) begin
       pf_q <= 1'b0; s_ev <= 1'b0; s_will <= 1'b0;
     end else begin
       // (INS: ES:EDI is translated before the port read, as the 386 check-write)
       if (act && s_pend && !s_ev && !l_pend && (done || eop == E_IN) && !ldwait && !fsel_any) begin
-        s_ev <= 1'b1; s_will <= st_will;
+        s_ev <= 1'b1; s_will <= st_tr;
       end
       if (e_pdone) begin
         if (!w_ok) begin
@@ -1650,7 +1660,8 @@ module tetrium_exec #(
   wire [3:0]  dty   = B[11:8];
   wire [1:0]  drpl  = dsel[1:0];
   // the code segment of a far transfer's DHI (high dword B, low dword T1) and its new EIP
-  wire        dxfer  = (ck == CK_CSJ) || (ck == CK_CSC) || (ck == CK_CGJ) || (ck == CK_CGC) ||
+  // (a far CALL's target: checked at its CS load, after the pushes, fcx below)
+  wire        dxfer  = (ck == CK_CSJ) || (ck == CK_CGJ) ||
                        (ck == CK_CSR) || (ck == CK_CSI) || (ck == CK_INTCS);
   wire [19:0] dlim20 = {B[19:16], t1[15:0]};
   wire [31:0] dlim   = B[23] ? {dlim20, 12'hFFF} : {12'h0, dlim20};
@@ -1818,6 +1829,10 @@ module tetrium_exec #(
   // #GP(0) (EXT during a delivery), before the stack switch / pushes / CS load; the
   // lowest-priority check of the DHI uop (registered on its own, merged in the 2nd cycle)
   wire eipx_r = (eop == E_DHI) && dxfer && !dsy && (deip > dlim);
+  // a far CALL's new EIP beyond the limit of its code segment (direct, or a call gate's): the
+  // 486 pushes the old CS and EIP before this branch fault is resolved (SDM Vol. 3 22.31.3),
+  // so it is raised by the CS load (LDCS, which pushes the EIP), and the pushes stay
+  wire fcx_r  = (eop == E_DHI) && ((ck == CK_CSC) || (ck == CK_CGC)) && !dsy && (deip > dlim);
   // descriptor low dword of DHI (T5 for the stack of a privilege change)
   wire [31:0] dlo_v = (eop == E_DHI && (ck == CK_NSS || ck == CK_RSS || ck == CK_TSSS || ck == CK_TDS)) ? tx[1] : t1;
   // CPL after LDCS: inner CALL / interrupt: the segment's DPL; RET / IRET: the selector's RPL
@@ -1865,7 +1880,7 @@ module tetrium_exec #(
   // descriptor-check uops take two E cycles: the checks (from the operands) are registered
   // in the first, the uop commits in the second (keeps the operands off the commit enables)
   // (only valid for those uops: the flags are qualified with their class)
-  logic       d_f_q, uj_c_q, io_flt_q, sup_d_q, eipx_q, jn_q;
+  logic       d_f_q, uj_c_q, io_flt_q, sup_d_q, eipx_q, jn_q, fcx_q, fcx;
   logic       d_e0, d_eg, d_et, lv_ok, arpl_c, uj_b11, dcg_q, sv_ok;
   logic [7:0] d_v;
   logic [4:0] uj_k;
@@ -1874,7 +1889,7 @@ module tetrium_exec #(
       d_f_q <= d_f_r; d_e0 <= d_e0_r; d_eg <= d_eg_r; d_et <= d_et_r; d_v <= d_v_r;
       uj_c_q <= uj_c_r; uj_k <= uj_k_r; lv_ok <= lv_ok_r; arpl_c <= arpl_c_r; io_flt_q <= io_flt_r;
       sup_d_q <= sup_d_r; uj_b11 <= B[11]; dcg_q <= dcg; sv_ok <= sv_ok_r; x0p <= x0p_r; eipx_q <= eipx_r;
-      jn_q <= (eop == E_JFAR) ? (B[31:16] != 16'h0) : (ip_a > cs_lim);
+      jn_q <= (eop == E_JFAR) ? (B[31:16] != 16'h0) : (ip_a > cs_lim); fcx_q <= fcx_r;
     end
   wire d_f    = c_ck && (d_f_q || eipx_q);
   wire d_fx   = !d_f_q && eipx_q;          // (the EIP check alone: #GP(0))
@@ -1966,7 +1981,11 @@ module tetrium_exec #(
   wire rmv     = !cr0[0] || vm;
   // (protected mode: the compare is registered in the uop's first cycle, c_jn below)
   wire jn_bad  = c_jn && jn_q;
-  wire ipflt_x = (tbad && ataken) || ((eop == E_JNEAR) && jn_bad) ||
+  // far CALL beyond the target's limit: protected mode at the LDCS (fcx), real mode / V86 at
+  // the JFAR; its stores go to W (fcall_st: the 486 has pushed)
+  wire fcl_bad = (eop == E_LDCS) && (wrk == WR_SEC) && ((ck == CK_CSC) || (ck == CK_CGI)) && fcx;
+  wire fcall_st = fcl_bad || ((eop == E_JFAR) && (wrk == WR_SEC) && !pg && (op == 8'h9A || op == 8'hFF) && c_jn && jn_q);
+  wire ipflt_x = (tbad && ataken) || ((eop == E_JNEAR) && jn_bad) || fcl_bad ||
                  ((eop == E_JFAR) && c_jn && jn_q) ||
                  (rmv && (sz == 2'd2) && (eop == E_IRET) && (t0[31:16] != 16'h0));
   wire ipflt_b = tbad && is_br && br_cond;
@@ -1978,7 +1997,8 @@ module tetrium_exec #(
   // MOV TR0-2: #UD (the i486 has TR3-TR7)
   wire trflt   = ((eop == E_TRD) || (eop == E_TWR)) && op[2] && (modrm[5:3] < 3'd3) ||
                  ((eop == E_CPUID) && !HAS_CPUID);
-  wire fault_x = ibf || gdflt || xflt || acp || acs || pf_q || (eop == E_UD) || trflt || derr || brflt || ipflt_x || nmflt || cpl0_flt || d_f;
+  wire fault_ni = ibf || gdflt || xflt || acp || acs || pf_q || (eop == E_UD) || trflt || derr || brflt || nmflt || cpl0_flt || d_f;
+  wire fault_x = fault_ni || ipflt_x;
   wire fault   = fault_x || ipflt_b || crflt;                          // restart at the instruction's first byte
   // (do_inj_a: the same without the #GP of a taken Jcc's target beyond the limit (ipflt_b,
   // from the lazy flags: the latest term), which the delivery registers take at their last
@@ -2004,6 +2024,11 @@ module tetrium_exec #(
   always_comb begin
     inj_err0 = 16'h0;
     if (ibf)                  inj_vec0 = 8'd1;
+    // (the static CPL / IOPL checks come after a decode #UD and before the uop's memory
+    // access: #GP(0) before its #SS / #GP / #AC / #PF, as the 486 and Bochs: PUSHF / POPF /
+    // IRET in V86 at IOPL < 3)
+    else if (xflt && !xs_q && (xc == 3'd1)) inj_vec0 = 8'd6;
+    else if (chk_flt)         inj_vec0 = 8'd13;
     else if (xflt && !xs_q)   inj_vec0 = (xc == 3'd1) ? 8'd6 : (xc == 3'd3) ? 8'd12 : 8'd13;
     else if (acp)             inj_vec0 = 8'd17;
     else if (xflt && !pf_q)   inj_vec0 = (xc == 3'd3) ? 8'd12 : 8'd13;          // the store's
@@ -2019,7 +2044,7 @@ module tetrium_exec #(
     else if (ipflt_x || crflt) inj_vec0 = 8'd13;              // (ipflt_b: at the use)
     else if (nmflt)           inj_vec0 = 8'd7;
     else if (eop == E_BOUND)  inj_vec0 = 8'd5;
-    else if (eop == E_INT)    inj_vec0 = (op == 8'hCC) ? 8'd3 : imm[7:0];
+    else if (eop == E_INT)    inj_vec0 = (op == 8'hCC) ? 8'd3 : (op == 8'hF1) ? 8'd1 : imm[7:0];
     else if (eop == E_INTO)   inj_vec0 = 8'd4;
     else                      inj_vec0 = 8'd0;                  // #DE
     
@@ -2032,6 +2057,8 @@ module tetrium_exec #(
   always_comb begin
     any_hi = 1'b1; ec_hi = 1'b0;
     if (ibf)                       ec_hi = 1'b0;
+    else if (xflt && !xs_q && (xc == 3'd1)) ec_hi = 1'b0;
+    else if (chk_flt)              ec_hi = 1'b1;
     else if (xflt && !xs_q)        ec_hi = (xc != 3'd1);
     else if (acp || (xflt && !pf_q) || pf_q || acs) ec_hi = 1'b1;
     else if (eop == E_UD || trflt) ec_hi = 1'b0;
@@ -2126,6 +2153,10 @@ module tetrium_exec #(
   wire ext_intr     = ext_int && !take_trap && !take_nmi && take_intr;
   wire wcommit  = complete && !fault;
   wire wcommit_x = complete && !fault_x;     // commit of the writes a conditional branch never makes
+  // (kept from the far CALL's code-segment DHI to its LDCS, in the same instruction)
+  always_ff @(posedge clk)
+    if (rst) fcx <= 1'b0;
+    else if (complete && (eop == E_DHI) && ((ck == CK_CSC) || (ck == CK_CGC))) fcx <= fcx_q;
 
   // IP after this uop: selected by uop type only (independent of mispredict)
   logic [31:0] nxt_ip;
@@ -2350,7 +2381,7 @@ module tetrium_exec #(
       if (fault_x && !first) begin of <= fl0[5]; af <= fl0[2]; cf <= fl0[0]; end
       if (fault) rf <= 1'b1;             // every fault pushes RF = 1 (386 / 486 manuals)
     end
-    if (!rst && ff_take && !ffbp) cr2 <= ff_lin;
+    if (!rst && ff_take && !ffbp && !ffgp) cr2 <= ff_lin;
     // a trap or interrupt between two iterations of a REP instruction pushes RF = 1: the
     // instruction goes on without meeting its breakpoint again (SDM 17.3.1.1)
     if (!rst && ext_int && ret_here && !repz_end) rf <= 1'b1;
@@ -2647,7 +2678,7 @@ module tetrium_exec #(
   always_ff @(posedge clk) begin
     if (rst) w_v <= 1'b0;
     // (a shift / rotate by a zero count stores nothing)
-    else if (!hold_w) w_v <= complete && wr_en && !fault_x && !st_sup && !((eop == E_SHIFT || eop == E_SHXD) && shb && sh_z);
+    else if (!hold_w) w_v <= complete && wr_en && (!fault_x || st_keep) && !st_sup && !((eop == E_SHIFT || eop == E_SHXD) && shb && sh_z);
   end
   always_ff @(posedge clk) begin
     if (!hold_w) begin
@@ -2723,7 +2754,7 @@ module tetrium_exec #(
       end
       if (ff_take) begin                            // fetch #PF (or the #DB of a breakpoint there)
         flush_r <= 1'b1; rd_stop <= 1'b1; rd_inject <= 1'b1;
-        rd_imm <= ffbp ? 32'd1 : 32'd14;
+        rd_imm <= ffbp ? 32'd1 : ffgp ? 32'd13 : 32'd14;
         rd_injid <= int_id; rd_ips <= ip_arch; rd_ipn <= ip_arch; rd_os32 <= 1'b0; rd_op <= 8'hCD; rd_int <= 1'b1;
         rd_ecvx <= !ffbp;
       end
@@ -2763,7 +2794,7 @@ module tetrium_exec #(
                ecyc, ip_start, eop, ck, A, B, t0, t1, t2, t3, fault, inj_vec, inj_err, xc);
   always_ff @(posedge clk)
     if (etr && complete)
-      $display("  db: dbr=%h dbw=%h dbtr=%0d dbtw=%0d dbacc=%h dbdel=%0d last=%0d bnd=%0d inj=%0d uj=%0d want=%0d tdbt=%0d ld_lin=%08x mrd=%0d",
+      $display("  db: op=%02x mrm=%02x pg=%0d dbr=%h dbw=%h dbtr=%0d dbtw=%0d dbacc=%h dbdel=%0d last=%0d bnd=%0d inj=%0d uj=%0d want=%0d tdbt=%0d ld_lin=%08x mrd=%0d", op, modrm, pg,
                dbr, dbw, dbtr, dbtw, dbacc, dbdel, last, bnd, inj, uj_take, want_int, take_dbt, ld_lin, mrd_q);
 `endif
 `ifdef SIM
@@ -2782,7 +2813,7 @@ module tetrium_exec #(
     if (rst) begin
       x_soft <= 1'b0; x_ecv <= 1'b0; x_errc <= 16'h0; gtrap <= 1'b0; x_exc <= 1'b0; x_df <= 1'b0; x_vec <= '0; tsk_op <= '0;
     end else if (complete && do_inj_a) begin
-      x_soft <= !fault_a;                  // INT n / INT3 / INTO
+      x_soft <= !fault_a && !((eop == E_INT) && (op == 8'hF1));   // INT n / INT3 / INTO (not ICEBP)
       x_ecv  <= inj_ecv;
       x_errc <= inj_err;
       x_exc  <= fault_a;
@@ -2793,7 +2824,8 @@ module tetrium_exec #(
     end else if (complete && want_int) begin
       x_soft <= 1'b0; x_ecv <= 1'b0; x_exc <= 1'b0; x_df <= 1'b0;
     end else if (ff_take) begin
-      x_soft <= 1'b0; x_ecv <= !ffbp; x_errc <= {13'h0, ff_err}; x_exc <= 1'b1; x_df <= 1'b0; x_vec <= ffbp ? 8'd1 : 8'd14;
+      x_soft <= 1'b0; x_ecv <= !ffbp; x_errc <= ffgp ? 16'h0 : {13'h0, ff_err}; x_exc <= 1'b1; x_df <= 1'b0;
+      x_vec <= ffbp ? 8'd1 : ffgp ? 8'd13 : 8'd14;
     end else if (xs == X_INTA || halted) begin
       x_soft <= 1'b0; x_ecv <= 1'b0; x_exc <= 1'b0; x_df <= 1'b0;
     end

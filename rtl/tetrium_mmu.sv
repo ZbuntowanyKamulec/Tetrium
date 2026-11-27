@@ -18,6 +18,8 @@
 //    (uncached, locked, after the store buffer has drained), the entry is written and
 //    the checks are redone on the walked bits.  Accessed / dirty bits are written
 //    only when they change; the written word's line is invalidated in both caches.
+//    (Not through the D-cache: with CR0.CD = NW = 1 a page-table write that only hit the
+//    cache is not seen by a walk, where a 486 reads the cached entry; README.)
 //  * L2 TLB (L2TLB_AB > 0): 2^L2TLB_AB entries in L2TLB_WAYS ways (1, 2 or 4) of
 //    2^L2TLB_AB / L2TLB_WAYS sets (set = the low bits of linear[31:12]), one block RAM per
 //    way, all read at once: {valid, tag, ppn, U, W, D, PCD, PWT} as the TLB's.  Read with

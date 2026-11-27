@@ -93,8 +93,8 @@ function automatic logic [22:0] class_af(input logic [4:0] c, input logic m3);
 endfunction
 function automatic logic [3:0] opclass0f(input logic [7:0] op);
   case (op)
-    8'h80, 8'h81, 8'h82, 8'h83, 8'h84, 8'h85, 8'h86, 8'h87, 8'h88, 8'h89, 8'h8A, 8'h8B, 8'h8C, 8'h8D, 8'h8E, 8'h8F: opclass0f = 4'd1;
-    8'h90, 8'h91, 8'h92, 8'h93, 8'h94, 8'h95, 8'h96, 8'h97, 8'h98, 8'h99, 8'h9A, 8'h9B, 8'h9C, 8'h9D, 8'h9E, 8'h9F, 8'hA4, 8'hA5, 8'hAC, 8'hAD, 8'hAF, 8'hB6, 8'hB7, 8'hBC, 8'hBD, 8'hBE, 8'hBF, 8'hC0, 8'hC1: opclass0f = 4'd2;
+    8'h10, 8'h11, 8'h12, 8'h13, 8'h90, 8'h91, 8'h92, 8'h93, 8'h94, 8'h95, 8'h96, 8'h97, 8'h98, 8'h99, 8'h9A, 8'h9B, 8'h9C, 8'h9D, 8'h9E, 8'h9F, 8'hA4, 8'hA5, 8'hAC, 8'hAD, 8'hAF, 8'hB6, 8'hB7, 8'hBC, 8'hBD, 8'hBE, 8'hBF, 8'hC0, 8'hC1: opclass0f = 4'd1;
+    8'h80, 8'h81, 8'h82, 8'h83, 8'h84, 8'h85, 8'h86, 8'h87, 8'h88, 8'h89, 8'h8A, 8'h8B, 8'h8C, 8'h8D, 8'h8E, 8'h8F: opclass0f = 4'd2;
     8'hA0, 8'hA8: opclass0f = 4'd3;
     8'hA1, 8'hA9: opclass0f = 4'd4;
     8'hA2: opclass0f = 4'd5;
@@ -108,10 +108,10 @@ function automatic logic [22:0] class0f_af(input logic [3:0] c, input logic m3);
   case ({c, m3})
     5'd0: class0f_af = 23'd2048;
     5'd1: class0f_af = 23'd2048;
-    5'd2: class0f_af = 23'd3584;
-    5'd3: class0f_af = 23'd3584;
-    5'd4: class0f_af = 23'd2049;
-    5'd5: class0f_af = 23'd2048;
+    5'd2: class0f_af = 23'd2049;
+    5'd3: class0f_af = 23'd2048;
+    5'd4: class0f_af = 23'd3584;
+    5'd5: class0f_af = 23'd3584;
     5'd6: class0f_af = 23'd10272;
     5'd7: class0f_af = 23'd10272;
     5'd8: class0f_af = 23'd10243;
