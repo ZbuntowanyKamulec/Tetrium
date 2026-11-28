@@ -108,6 +108,8 @@ module tetrium_fetch #(
     output logic        ff_flt,        // fetch stopped at a page fault (error code, address)
     output logic [2:0]  ff_err,
     output logic [31:0] ff_lin,
+    output logic [31:0] fw_lin,        // the block a walk would be for, and
+    input  logic        f_past,        //   it lies wholly beyond the CS limit (registered, exec)
     // status
     input  logic        inv_all,      // invalidate every line (INVD / WBINVD / FLUSH): the tag sweep
     output logic        inv_busy,     // ... requested or running
@@ -924,7 +926,11 @@ module tetrium_fetch #(
   logic [31:12] fw_a;              // its page
   assign fl_a     = f_lin[31:12];
   assign fl_touch = (st == S_XL);
-  assign f_req    = (st == S_FW) && !fw_out && !fw_stale && fe_drained;
+  // (a block wholly beyond the CS limit is not translated: the 486 prefetcher stops at the
+  //  limit, no walk sets an accessed bit; exec raises its #GP(0) (ffgp) at the fault state)
+  assign fw_lin   = f_lin;
+  wire   fw_past  = (st == S_FW) && !fw_out && !fw_stale && fe_drained && f_past;
+  assign f_req    = (st == S_FW) && !fw_out && !fw_stale && fe_drained && !f_past;
   assign lt_v     = q_push && pg;
   assign lt_sw    = {f_lin[14:12], lpf_way};
   assign ff_flt   = (st == S_FAULT);
@@ -954,6 +960,7 @@ module tetrium_fetch #(
       else if (redir_v || stop) fw_stale <= 1'b1;
     end
     if (st == S_FW && f_done) begin ff_err <= w_err; ff_lin <= f_lin; end
+    else if (fw_past) begin ff_err <= 3'd0; ff_lin <= f_lin; end
   end
 
 `ifdef SIM
@@ -1066,6 +1073,7 @@ module tetrium_fetch #(
         S_XL: st <= (fl_hit && (fl_e[4] || !cpl3)) ? S_RUN : S_FW;
         // walk, once nothing older is left; a redirect meanwhile only waits for it
         S_FW: if (f_done) st <= (w_ok || fw_stale) ? S_RUN : S_FAULT;
+              else if (fw_past) st <= S_FAULT;
         S_FAULT: ;
         default: st <= S_RUN;
       endcase

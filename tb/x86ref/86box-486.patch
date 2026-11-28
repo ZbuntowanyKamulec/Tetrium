@@ -387,19 +387,20 @@ index 8fa102645..135d10913 100644
 +    return 1;
 +}
 diff --git a/src/cpu/386_dynarec.c b/src/cpu/386_dynarec.c
-index f0b608aec..94619cbb6 100644
+index f0b608aec..e52f66bdc 100644
 --- a/src/cpu/386_dynarec.c
 +++ b/src/cpu/386_dynarec.c
-@@ -47,6 +47,8 @@
+@@ -47,6 +47,9 @@
  
  #include "386_common.h"
  #include "x86_interrupt.h"
 +/* x86ref (Tetrium testbench): the instruction being stepped transfers control */
 +extern int x86ref_xfer_on;
++extern int x86ref_xfer_faults(void);   /* (taken beyond the CS limit: not a Jcc / LOOP falling through) */
  
  #if defined(__APPLE__) && defined(__aarch64__)
  #    include <pthread.h>
-@@ -124,7 +126,9 @@ fetch_ea_32_long(uint32_t rmdat)
+@@ -124,7 +127,9 @@ fetch_ea_32_long(uint32_t rmdat)
              cpu_state.eaaddr = getlong();
          }
      }
@@ -410,7 +411,7 @@ index f0b608aec..94619cbb6 100644
          uint32_t addr = easeg + cpu_state.eaaddr;
          if (readlookup2[addr >> 12] != (uintptr_t) -1)
              eal_r = (uint32_t *) (readlookup2[addr >> 12] + addr);
-@@ -160,7 +164,9 @@ fetch_ea_16_long(uint32_t rmdat)
+@@ -160,7 +165,9 @@ fetch_ea_16_long(uint32_t rmdat)
          }
          cpu_state.eaaddr &= 0xFFFF;
      }
@@ -421,7 +422,7 @@ index f0b608aec..94619cbb6 100644
          uint32_t addr = easeg + cpu_state.eaaddr;
          if (readlookup2[addr >> 12] != (uintptr_t) -1)
              eal_r = (uint32_t *) (readlookup2[addr >> 12] + addr);
-@@ -1637,7 +1643,7 @@ exec386_common(int32_t cycs, const int dbg)
+@@ -1637,7 +1644,7 @@ exec386_common(int32_t cycs, const int dbg)
              if (inboard386_present)
                  inboard_post_fixups();
  
@@ -430,7 +431,7 @@ index f0b608aec..94619cbb6 100644
                  ins_fetch_fault = cpu_386_check_instruction_fault();
  
              /* Breakpoint fault has priority over other faults. */
-@@ -1673,11 +1679,26 @@ exec386_common(int32_t cycs, const int dbg)
+@@ -1673,11 +1680,26 @@ exec386_common(int32_t cycs, const int dbg)
                      trap = cpu_state.flags & T_FLAG;
  
                  cpu_state.pc++;
@@ -459,7 +460,7 @@ index f0b608aec..94619cbb6 100644
              }
  #ifdef ENABLE_386_LOG
              else if (in_smm)
-@@ -1722,6 +1743,8 @@ block_ended:
+@@ -1722,6 +1744,8 @@ block_ended:
  
                  if (dbg && is386 && !x86_was_reset && ins_fetch_fault)
                      x86gen();
@@ -468,12 +469,12 @@ index f0b608aec..94619cbb6 100644
              } else if (new_ne) {
                  flags_rebuild();
  
-@@ -1729,16 +1752,20 @@ block_ended:
+@@ -1729,16 +1753,20 @@ block_ended:
                  oldcs = CS;
                  cpu_state.oldpc = cpu_state.pc;
                  x86_int(16);
 -            } else if (trap) {
-+            } else if (trap && !(x86ref_xfer_on && (cpu_state.pc > cpu_state.seg_cs.limit_high))) {
++            } else if (trap && !x86ref_xfer_faults()) {
 +                /* (x86ref: a transfer beyond the CS limit is a #GP of the instruction,
 +                   delivered by the testbench library, with no trap after it) */
                  flags_rebuild();
@@ -666,7 +667,7 @@ index e57ebeb61..5469a2e2b 100644
              dr[i] = 0x00000000;
          dr[6] = is586 ? 0xffff0ff0 : 0xffff1ff0;
 diff --git a/src/cpu/x86_ops_call.h b/src/cpu/x86_ops_call.h
-index 18a4d87ca..6fe5c84c6 100644
+index 18a4d87ca..bce4c37b9 100644
 --- a/src/cpu/x86_ops_call.h
 +++ b/src/cpu/x86_ops_call.h
 @@ -184,7 +184,7 @@ opFF_w_a16(uint32_t fetchdat)
@@ -738,6 +739,24 @@ index 18a4d87ca..6fe5c84c6 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1UL);
+@@ -403,7 +411,7 @@ opFF_w_a32(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
++            /* (32-bit address: each part limit-checked, see opLDS_w_a32) */ CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1); CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 3);
+             new_pc = readmemw(easeg, cpu_state.eaaddr);
+             new_cs = readmemw(easeg, (cpu_state.eaaddr + 2));
+             if (cpu_state.abrt)
+@@ -439,7 +447,7 @@ opFF_w_a32(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
++            /* (32-bit address: each part limit-checked, see opLDS_w_a32) */ CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1); CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 3);
+             old_pc = cpu_state.pc;
+             new_pc = readmemw(easeg, cpu_state.eaaddr);
+             new_cs = readmemw(easeg, cpu_state.eaaddr + 2);
 @@ -495,7 +503,7 @@ opFF_l_a16(uint32_t fetchdat)
      switch (rmdat & 0x38) {
          case 0x00: /*INC l*/
@@ -807,6 +826,24 @@ index 18a4d87ca..6fe5c84c6 100644
                  if (cpu_state.abrt)
                      return 1;
                  CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3UL);
+@@ -716,7 +732,7 @@ opFF_l_a32(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5UL);
++            /* (32-bit address: each part limit-checked, see opLDS_w_a32) */ CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3); CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 4, cpu_state.eaaddr + 5);
+             new_pc = readmeml(easeg, cpu_state.eaaddr);
+             new_cs = readmemw(easeg, (cpu_state.eaaddr + 4));
+             if (cpu_state.abrt)
+@@ -752,7 +768,7 @@ opFF_l_a32(uint32_t fetchdat)
+             SEG_CHECK_READ(cpu_state.ea_seg);
+             if (cpu_state.abrt)
+                 return 1;
+-            CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5UL);
++            /* (32-bit address: each part limit-checked, see opLDS_w_a32) */ CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3); CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 4, cpu_state.eaaddr + 5);
+             old_pc = cpu_state.pc;
+             new_pc = readmeml(easeg, cpu_state.eaaddr);
+             new_cs = readmemw(easeg, cpu_state.eaaddr + 4);
 diff --git a/src/cpu/x86_ops_inc_dec.h b/src/cpu/x86_ops_inc_dec.h
 index 8b9711aaa..e5bbe2efe 100644
 --- a/src/cpu/x86_ops_inc_dec.h
@@ -862,7 +899,7 @@ index 11aa4d0a4..ab30c2dd3 100644
      PREFETCH_RUN(cycles_old - cycles, 1, -1, 0, 0, 0, 0, 0);
      return 1;
 diff --git a/src/cpu/x86_ops_misc.h b/src/cpu/x86_ops_misc.h
-index 639c2c029..e92846383 100644
+index 639c2c029..ff68d6ad5 100644
 --- a/src/cpu/x86_ops_misc.h
 +++ b/src/cpu/x86_ops_misc.h
 @@ -63,7 +63,10 @@ opF6_a16(uint32_t fetchdat)
@@ -956,7 +993,18 @@ index 639c2c029..e92846383 100644
      if (cpu_state.abrt)
          return 1;
  
-@@ -865,9 +889,15 @@ opBOUND_l_a16(uint32_t fetchdat)
+@@ -840,7 +864,9 @@ opBOUND_w_a32(uint32_t fetchdat)
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ_EA(4);
++    /* (Tetrium lockstep: 32-bit address, the second part at (EA + n) mod 4G, each part limit-checked, as with a 16-bit address (386EX); SDM 5.3: a wrap at a 4 GB limit is implementation-specific) */
++    CHECK_READ_EA(2);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 3);
+     low  = geteaw();
+     high = readmemw(easeg, cpu_state.eaaddr + 2);
+     if (cpu_state.abrt)
+@@ -865,9 +891,15 @@ opBOUND_l_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -975,7 +1023,18 @@ index 639c2c029..e92846383 100644
      if (cpu_state.abrt)
          return 1;
  
-@@ -953,6 +983,12 @@ set_segment_limit(x86seg *s, uint8_t segdat3)
+@@ -889,7 +921,9 @@ opBOUND_l_a32(uint32_t fetchdat)
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ_EA(8);
++    /* (Tetrium lockstep: 32-bit address, the second part at (EA + n) mod 4G, each part limit-checked, as with a 16-bit address (386EX); SDM 5.3: a wrap at a 4 GB limit is implementation-specific) */
++    CHECK_READ_EA(4);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 4, cpu_state.eaaddr + 7);
+     low  = geteal();
+     high = readmeml(easeg, cpu_state.eaaddr + 4);
+     if (cpu_state.abrt)
+@@ -953,6 +987,12 @@ set_segment_limit(x86seg *s, uint8_t segdat3)
      } else {
          s->limit_high = (segdat3 & 0x40) ? 0xffffffff : 0xffff;
          s->limit_low  = s->limit + 1;
@@ -1185,10 +1244,41 @@ index 2b221d79c..cd152949d 100644
          x86gpf(NULL, 0);
          return 1;
 diff --git a/src/cpu/x86_ops_mov_seg.h b/src/cpu/x86_ops_mov_seg.h
-index c802a7446..4487d21f4 100644
+index c802a7446..650777374 100644
 --- a/src/cpu/x86_ops_mov_seg.h
 +++ b/src/cpu/x86_ops_mov_seg.h
-@@ -306,11 +306,15 @@ opLDS_w_a16(uint32_t fetchdat)
+@@ -1,3 +1,4 @@
++extern int (*x86ref_ss_next_bad)(void);
+ static int
+ opMOV_w_seg_a16(uint32_t fetchdat)
+ {
+@@ -204,6 +205,12 @@ opMOV_seg_w_a16(uint32_t fetchdat)
+             cpu_state.op32   = use32;
+             cpu_state.ssegs  = 0;
+             cpu_state.ea_seg = &cpu_state.seg_ds;
++            /* x86ref: the instruction after MOV / POP SS beyond the CS limit: #GP(0) at it
++               (86Box runs it inline, without the limit check of a fetch) */
++            if (x86ref_ss_next_bad && x86ref_ss_next_bad()) {
++                x86gpf(NULL, 0);
++                return 1;
++            }
+             fetchdat         = fastreadl(cs + cpu_state.pc);
+             cpu_state.pc++;
+             if (cpu_state.abrt)
+@@ -268,6 +275,12 @@ opMOV_seg_w_a32(uint32_t fetchdat)
+             cpu_state.op32   = use32;
+             cpu_state.ssegs  = 0;
+             cpu_state.ea_seg = &cpu_state.seg_ds;
++            /* x86ref: the instruction after MOV / POP SS beyond the CS limit: #GP(0) at it
++               (86Box runs it inline, without the limit check of a fetch) */
++            if (x86ref_ss_next_bad && x86ref_ss_next_bad()) {
++                x86gpf(NULL, 0);
++                return 1;
++            }
+             fetchdat         = fastreadl(cs + cpu_state.pc);
+             cpu_state.pc++;
+             if (cpu_state.abrt)
+@@ -306,11 +319,15 @@ opLDS_w_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -1206,7 +1296,18 @@ index c802a7446..4487d21f4 100644
      if (cpu_state.abrt)
          return 1;
      op_loadseg(seg, &cpu_state.seg_ds);
-@@ -354,11 +358,15 @@ opLDS_l_a16(uint32_t fetchdat)
+@@ -331,7 +348,9 @@ opLDS_w_a32(uint32_t fetchdat)
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
++    /* (Tetrium lockstep: 32-bit address, the second part at (EA + n) mod 4G, each part limit-checked, as with a 16-bit address (386EX); SDM 5.3: a wrap at a 4 GB limit is implementation-specific) */
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 3);
+     addr = readmemw(easeg, cpu_state.eaaddr);
+     seg  = readmemw(easeg, cpu_state.eaaddr + 2);
+     if (cpu_state.abrt)
+@@ -354,11 +373,15 @@ opLDS_l_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -1224,7 +1325,18 @@ index c802a7446..4487d21f4 100644
      if (cpu_state.abrt)
          return 1;
      op_loadseg(seg, &cpu_state.seg_ds);
-@@ -403,11 +411,15 @@ opLSS_w_a16(uint32_t fetchdat)
+@@ -379,7 +402,9 @@ opLDS_l_a32(uint32_t fetchdat)
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5);
++    /* (Tetrium lockstep: 32-bit address, the second part at (EA + n) mod 4G, each part limit-checked, as with a 16-bit address (386EX); SDM 5.3: a wrap at a 4 GB limit is implementation-specific) */
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 4, cpu_state.eaaddr + 5);
+     addr = readmeml(easeg, cpu_state.eaaddr);
+     seg  = readmemw(easeg, cpu_state.eaaddr + 4);
+     if (cpu_state.abrt)
+@@ -403,11 +428,15 @@ opLSS_w_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -1242,7 +1354,18 @@ index c802a7446..4487d21f4 100644
      if (cpu_state.abrt)
          return 1;
      op_loadseg(seg, &cpu_state.seg_ss);
-@@ -451,11 +463,15 @@ opLSS_l_a16(uint32_t fetchdat)
+@@ -428,7 +457,9 @@ opLSS_w_a32(uint32_t fetchdat)
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
++    /* (Tetrium lockstep: 32-bit address, the second part at (EA + n) mod 4G, each part limit-checked, as with a 16-bit address (386EX); SDM 5.3: a wrap at a 4 GB limit is implementation-specific) */
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 3);
+     addr = readmemw(easeg, cpu_state.eaaddr);
+     seg  = readmemw(easeg, cpu_state.eaaddr + 2);
+     if (cpu_state.abrt)
+@@ -451,11 +482,15 @@ opLSS_l_a16(uint32_t fetchdat)
      fetch_ea_16(fetchdat);
      ILLEGAL_ON(cpu_mod == 3);
      SEG_CHECK_READ(cpu_state.ea_seg);
@@ -1260,7 +1383,18 @@ index c802a7446..4487d21f4 100644
      if (cpu_state.abrt)
          return 1;
      op_loadseg(seg, &cpu_state.seg_ss);
-@@ -499,11 +515,15 @@ opLSS_l_a32(uint32_t fetchdat)
+@@ -476,7 +511,9 @@ opLSS_l_a32(uint32_t fetchdat)
+     fetch_ea_32(fetchdat);
+     ILLEGAL_ON(cpu_mod == 3);
+     SEG_CHECK_READ(cpu_state.ea_seg);
+-    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5);
++    /* (Tetrium lockstep: 32-bit address, the second part at (EA + n) mod 4G, each part limit-checked, as with a 16-bit address (386EX); SDM 5.3: a wrap at a 4 GB limit is implementation-specific) */
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3);
++    CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 4, cpu_state.eaaddr + 5);
+     addr = readmeml(easeg, cpu_state.eaaddr);
+     seg  = readmemw(easeg, cpu_state.eaaddr + 4);
+     if (cpu_state.abrt)
+@@ -499,11 +536,15 @@ opLSS_l_a32(uint32_t fetchdat)
          fetch_ea_16(fetchdat);                                                \
          SEG_CHECK_READ(cpu_state.ea_seg);                                     \
          ILLEGAL_ON(cpu_mod == 3);                                             \
@@ -1278,7 +1412,18 @@ index c802a7446..4487d21f4 100644
          if (cpu_state.abrt)                                                   \
              return 1;                                                         \
          op_loadseg(seg, &sel);                                                \
-@@ -546,11 +566,15 @@ opLSS_l_a32(uint32_t fetchdat)
+@@ -523,7 +564,9 @@ opLSS_l_a32(uint32_t fetchdat)
+         fetch_ea_32(fetchdat);                                                \
+         SEG_CHECK_READ(cpu_state.ea_seg);                                     \
+         ILLEGAL_ON(cpu_mod == 3);                                             \
+-        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3); \
++        /* (32-bit address: each part limit-checked, see opLDS_w_a32) */      \
++        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1); \
++        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 3); \
+         addr = readmemw(easeg, cpu_state.eaaddr);                             \
+         seg  = readmemw(easeg, cpu_state.eaaddr + 2);                         \
+         if (cpu_state.abrt)                                                   \
+@@ -546,11 +589,15 @@ opLSS_l_a32(uint32_t fetchdat)
          fetch_ea_16(fetchdat);                                                \
          SEG_CHECK_READ(cpu_state.ea_seg);                                     \
          ILLEGAL_ON(cpu_mod == 3);                                             \
@@ -1296,27 +1441,76 @@ index c802a7446..4487d21f4 100644
          if (cpu_state.abrt)                                                   \
              return 1;                                                         \
          op_loadseg(seg, &sel);                                                \
+@@ -571,7 +618,9 @@ opLSS_l_a32(uint32_t fetchdat)
+         fetch_ea_32(fetchdat);                                                \
+         SEG_CHECK_READ(cpu_state.ea_seg);                                     \
+         ILLEGAL_ON(cpu_mod == 3);                                             \
+-        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 5); \
++        /* (32-bit address: each part limit-checked, see opLDS_w_a32) */      \
++        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 3); \
++        CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 4, cpu_state.eaaddr + 5); \
+         addr = readmeml(easeg, cpu_state.eaaddr);                             \
+         seg  = readmemw(easeg, cpu_state.eaaddr + 4);                         \
+         if (cpu_state.abrt)                                                   \
 diff --git a/src/cpu/x86_ops_pmode.h b/src/cpu/x86_ops_pmode.h
-index 29d45f562..a6daf8619 100644
+index 29d45f562..6ae0e2f23 100644
 --- a/src/cpu/x86_ops_pmode.h
 +++ b/src/cpu/x86_ops_pmode.h
-@@ -495,6 +495,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+@@ -466,7 +466,12 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+         case 0x00: /*SGDT*/
+             ILLEGAL_ON(cpu_mod == 3);
+             SEG_CHECK_WRITE(cpu_state.ea_seg);
+-            CHECK_WRITE_EA(6); /* the limit and the base */
++            if (ea32) { /* (32-bit address: each part limit-checked, see opLDS_w_a32) */
++                CHECK_WRITE_COMMON(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
++                CHECK_WRITE_COMMON(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 5);
++            } else {
++                CHECK_WRITE_EA(6); /* the limit and the base */
++            }
+             seteaw(gdt.limit);
+             base = gdt.base; // is32 ? gdt.base : (gdt.base & 0xffffff);
+             if (is286)
+@@ -478,7 +483,12 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+         case 0x08: /*SIDT*/
+             ILLEGAL_ON(cpu_mod == 3);
+             SEG_CHECK_WRITE(cpu_state.ea_seg);
+-            CHECK_WRITE_EA(6); /* the limit and the base */
++            if (ea32) { /* (32-bit address: each part limit-checked, see opLDS_w_a32) */
++                CHECK_WRITE_COMMON(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
++                CHECK_WRITE_COMMON(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 5);
++            } else {
++                CHECK_WRITE_EA(6); /* the limit and the base */
++            }
+             seteaw(idt.limit);
+             base = idt.base;
+             if (is286)
+@@ -495,6 +505,12 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
              }
              if (cpu_mod != 3)
                  SEG_CHECK_READ(cpu_state.ea_seg);
-+            CHECK_READ_EA(6); /* x86ref: the base is limit-checked too, before either part is read */
++            if (ea32) { /* (32-bit address: each part limit-checked, see opLDS_w_a32) */
++                CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
++                CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 5);
++            } else {
++                CHECK_READ_EA(6); /* x86ref: the base is limit-checked too, before either part is read */
++            }
              limit = geteaw();
              base  = readmeml(0, easeg + cpu_state.eaaddr + 2);
              if (cpu_state.abrt)
-@@ -514,6 +515,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+@@ -514,6 +530,12 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
              }
              if (cpu_mod != 3)
                  SEG_CHECK_READ(cpu_state.ea_seg);
-+            CHECK_READ_EA(6); /* x86ref: the base is limit-checked too, before either part is read */
++            if (ea32) { /* (32-bit address: each part limit-checked, see opLDS_w_a32) */
++                CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr, cpu_state.eaaddr + 1);
++                CHECK_READ(cpu_state.ea_seg, cpu_state.eaaddr + 2, cpu_state.eaaddr + 5);
++            } else {
++                CHECK_READ_EA(6); /* x86ref: the base is limit-checked too, before either part is read */
++            }
              limit = geteaw();
              base  = readmeml(0, easeg + cpu_state.eaaddr + 2);
              if (cpu_state.abrt)
-@@ -531,7 +533,9 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+@@ -531,7 +553,9 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
                  SEG_CHECK_WRITE(cpu_state.ea_seg);
              if (is386 && is32 && (cpu_mod == 3)) {
                  if (is486 || isibm486)
@@ -1327,7 +1521,7 @@ index 29d45f562..a6daf8619 100644
                  else if (is386 && !cpu_16bitbus)
                      seteaw(cr0 | /* 0x7FFFFF00 */ 0x7FFFFFE0);
                  else
-@@ -583,6 +587,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
+@@ -583,6 +607,7 @@ op0F01_common(UNUSED(uint32_t fetchdat), int is32, int is286, UNUSED(int ea32))
                     elsewhere. */
                  flushmmucache_pc();
                  flushmmucache_nopc();
@@ -1336,10 +1530,17 @@ index 29d45f562..a6daf8619 100644
                  PREFETCH_RUN(12, 2, rmdat, 0, 0, 0, 0, ea32);
                  break;
 diff --git a/src/cpu/x86_ops_rep.h b/src/cpu/x86_ops_rep.h
-index 03808299d..e6bbf842d 100644
+index 03808299d..76ac26525 100644
 --- a/src/cpu/x86_ops_rep.h
 +++ b/src/cpu/x86_ops_rep.h
-@@ -5,10 +5,11 @@
+@@ -1,3 +1,6 @@
++/* x86ref: a REP string instruction runs to its end (a fault, a trap, SMI) in one step, as the
++   486's microcode loop, which does not fetch it again (stores into its own bytes) */
++extern int x86ref_rep_whole;
+ #define REP_OPS(size, CNT_REG, SRC_REG, DEST_REG)                                                                 \
+     static int opREP_INSB_##size(UNUSED(uint32_t fetchdat))                                                       \
+     {                                                                                                             \
+@@ -5,10 +8,11 @@
                                                                                                                    \
          addr64 = 0x00000000;                                                                                      \
                                                                                                                    \
@@ -1352,7 +1553,7 @@ index 03808299d..e6bbf842d 100644
                                                                                                                    \
              SEG_CHECK_WRITE(&cpu_state.seg_es);                                                                   \
              CHECK_WRITE(&cpu_state.seg_es, DEST_REG, DEST_REG);                                                   \
-@@ -33,7 +34,7 @@
+@@ -33,7 +37,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -1361,7 +1562,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -44,10 +45,11 @@
+@@ -44,10 +48,11 @@
                                                                                                                    \
          addr64a[0] = addr64a[1] = 0x00000000;                                                                     \
                                                                                                                    \
@@ -1374,7 +1575,7 @@ index 03808299d..e6bbf842d 100644
                                                                                                                    \
              SEG_CHECK_WRITE(&cpu_state.seg_es);                                                                   \
              CHECK_WRITE(&cpu_state.seg_es, DEST_REG, DEST_REG + 1UL);                                             \
-@@ -72,7 +74,7 @@
+@@ -72,7 +77,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -1383,7 +1584,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -83,10 +85,11 @@
+@@ -83,10 +88,11 @@
                                                                                                                    \
          addr64a[0] = addr64a[1] = addr64a[2] = addr64a[3] = 0x00000000;                                           \
                                                                                                                    \
@@ -1396,7 +1597,7 @@ index 03808299d..e6bbf842d 100644
                                                                                                                    \
              SEG_CHECK_WRITE(&cpu_state.seg_es);                                                                   \
              CHECK_WRITE(&cpu_state.seg_es, DEST_REG, DEST_REG + 3UL);                                             \
-@@ -111,7 +114,7 @@
+@@ -111,7 +117,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, writes, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -1405,7 +1606,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -123,6 +126,8 @@
+@@ -123,6 +129,8 @@
                                                                                                                    \
          addr64 = 0x00000000;                                                                                      \
                                                                                                                    \
@@ -1414,7 +1615,7 @@ index 03808299d..e6bbf842d 100644
          if (CNT_REG > 0) {                                                                                        \
              uint8_t temp;                                                                                         \
                                                                                                                    \
-@@ -132,7 +137,6 @@
+@@ -132,7 +140,6 @@
              do_mmut_rb(cpu_state.ea_seg->base, SRC_REG, &addr64);                                                 \
              if (cpu_state.abrt)                                                                                   \
                  return 1;                                                                                         \
@@ -1422,7 +1623,7 @@ index 03808299d..e6bbf842d 100644
                                                                                                                    \
              temp = readmemb_n(cpu_state.ea_seg->base, SRC_REG, addr64);                                           \
              outb(DX, temp);                                                                                       \
-@@ -150,7 +154,7 @@
+@@ -150,7 +157,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -1431,7 +1632,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -161,6 +165,8 @@
+@@ -161,6 +168,8 @@
                                                                                                                    \
          addr64a[0] = addr64a[1] = 0x00000000;                                                                     \
                                                                                                                    \
@@ -1440,7 +1641,7 @@ index 03808299d..e6bbf842d 100644
          if (CNT_REG > 0) {                                                                                        \
              uint16_t temp;                                                                                        \
                                                                                                                    \
-@@ -170,7 +176,6 @@
+@@ -170,7 +179,6 @@
              do_mmut_rw(cpu_state.ea_seg->base, SRC_REG, addr64a);                                                 \
              if (cpu_state.abrt)                                                                                   \
                  return 1;                                                                                         \
@@ -1448,7 +1649,7 @@ index 03808299d..e6bbf842d 100644
                                                                                                                    \
              temp = readmemw_n(cpu_state.ea_seg->base, SRC_REG, addr64a);                                          \
              outw(DX, temp);                                                                                       \
-@@ -188,7 +193,7 @@
+@@ -188,7 +196,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -1457,7 +1658,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -199,6 +204,8 @@
+@@ -199,6 +207,8 @@
                                                                                                                    \
          addr64a[0] = addr64a[1] = addr64a[2] = addr64a[3] = 0x00000000;                                           \
                                                                                                                    \
@@ -1466,7 +1667,7 @@ index 03808299d..e6bbf842d 100644
          if (CNT_REG > 0) {                                                                                        \
              uint32_t temp;                                                                                        \
                                                                                                                    \
-@@ -208,7 +215,6 @@
+@@ -208,7 +218,6 @@
              do_mmut_rl(cpu_state.ea_seg->base, SRC_REG, addr64a);                                                 \
              if (cpu_state.abrt)                                                                                   \
                  return 1;                                                                                         \
@@ -1474,7 +1675,7 @@ index 03808299d..e6bbf842d 100644
                                                                                                                    \
              temp = readmeml_n(cpu_state.ea_seg->base, SRC_REG, addr64a);                                          \
              outl(DX, temp);                                                                                       \
-@@ -226,7 +232,7 @@
+@@ -226,7 +235,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, writes, 0);                                                \
          if (CNT_REG > 0) {                                                                                        \
              CPU_BLOCK_END();                                                                                      \
@@ -1483,12 +1684,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -271,13 +277,13 @@
+@@ -271,13 +280,13 @@
              reads++;                                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 3 : 4;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
@@ -1499,12 +1700,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -322,13 +328,13 @@
+@@ -322,13 +331,13 @@
              reads++;                                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 3 : 4;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
@@ -1515,12 +1716,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -373,13 +379,13 @@
+@@ -373,13 +382,13 @@
              reads++;                                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 3 : 4;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
@@ -1531,12 +1732,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -407,13 +413,13 @@
+@@ -407,13 +416,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 4 : 5;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, 0, 0, writes, 0, 0);                                                    \
@@ -1547,12 +1748,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -440,13 +446,13 @@
+@@ -440,13 +449,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 4 : 5;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, 0, 0, writes, 0, 0);                                                    \
@@ -1563,12 +1764,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -473,13 +479,13 @@
+@@ -473,13 +482,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              writes++;                                                                                             \
              total_cycles += is486 ? 4 : 5;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, 0, 0, 0, writes, 0);                                                    \
@@ -1579,12 +1780,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -508,13 +514,13 @@
+@@ -508,13 +517,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 4 : 5;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
@@ -1595,12 +1796,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -542,13 +548,13 @@
+@@ -542,13 +551,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 4 : 5;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
@@ -1611,12 +1812,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -576,13 +582,13 @@
+@@ -576,13 +585,13 @@
              cycles -= is486 ? 4 : 5;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 4 : 5;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, 0, 0);                                                     \
@@ -1627,7 +1828,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -634,7 +640,7 @@
+@@ -634,7 +643,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
          if ((CNT_REG > 0) && (FV == tempz)) {                                                                     \
              CPU_BLOCK_END();                                                                                      \
@@ -1636,7 +1837,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -685,7 +691,7 @@
+@@ -685,7 +694,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
          if ((CNT_REG > 0) && (FV == tempz)) {                                                                     \
              CPU_BLOCK_END();                                                                                      \
@@ -1645,7 +1846,7 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -736,7 +742,7 @@
+@@ -736,7 +745,7 @@
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, 0, 0);                                                     \
          if ((CNT_REG > 0) && (FV == tempz)) {                                                                     \
              CPU_BLOCK_END();                                                                                      \
@@ -1654,12 +1855,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -766,13 +772,13 @@
+@@ -766,13 +775,13 @@
              cycles -= is486 ? 5 : 8;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 5 : 8;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
@@ -1670,12 +1871,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -801,13 +807,13 @@
+@@ -801,13 +810,13 @@
              cycles -= is486 ? 5 : 8;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 5 : 8;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
@@ -1686,12 +1887,12 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
-@@ -836,13 +842,13 @@
+@@ -836,13 +845,13 @@
              cycles -= is486 ? 5 : 8;                                                                              \
              reads++;                                                                                              \
              total_cycles += is486 ? 5 : 8;                                                                        \
 -            if ((cycles < cycles_end) || smi_line)                                                                \
-+            if ((cycles < cycles_end) || smi_line || (trap & 0x10d))                                                            \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line || (trap & 0x10d))                                                            \
                  break;                                                                                            \
          }                                                                                                         \
          PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, 0, 0);                                                     \
@@ -1702,6 +1903,125 @@ index 03808299d..e6bbf842d 100644
              return 1;                                                                                             \
          }                                                                                                         \
          return cpu_state.abrt;                                                                                    \
+diff --git a/src/cpu/x86_ops_rep_2386.h b/src/cpu/x86_ops_rep_2386.h
+index 0dc657fe3..b75ee541f 100644
+--- a/src/cpu/x86_ops_rep_2386.h
++++ b/src/cpu/x86_ops_rep_2386.h
+@@ -1,3 +1,6 @@
++/* x86ref: a REP string instruction runs to its end (a fault, a trap, SMI) in one step, as the
++   486's microcode loop, which does not fetch it again (stores into its own bytes) */
++extern int x86ref_rep_whole;
+ #define REP_OPS(size, CNT_REG, SRC_REG, DEST_REG)                                                                 \
+     static int opREP_INSB_##size(UNUSED(uint32_t fetchdat))                                                       \
+     {                                                                                                             \
+@@ -271,7 +274,7 @@
+             reads++;                                                                                              \
+             writes++;                                                                                             \
+             total_cycles += is486 ? 3 : 4;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
+@@ -322,7 +325,7 @@
+             reads++;                                                                                              \
+             writes++;                                                                                             \
+             total_cycles += is486 ? 3 : 4;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
+@@ -373,7 +376,7 @@
+             reads++;                                                                                              \
+             writes++;                                                                                             \
+             total_cycles += is486 ? 3 : 4;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, writes, 0, 0);                                                \
+@@ -407,7 +410,7 @@
+             cycles -= is486 ? 4 : 5;                                                                              \
+             writes++;                                                                                             \
+             total_cycles += is486 ? 4 : 5;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, 0, 0, writes, 0, 0);                                                    \
+@@ -440,7 +443,7 @@
+             cycles -= is486 ? 4 : 5;                                                                              \
+             writes++;                                                                                             \
+             total_cycles += is486 ? 4 : 5;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, 0, 0, writes, 0, 0);                                                    \
+@@ -473,7 +476,7 @@
+             cycles -= is486 ? 4 : 5;                                                                              \
+             writes++;                                                                                             \
+             total_cycles += is486 ? 4 : 5;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, 0, 0, 0, writes, 0);                                                    \
+@@ -508,7 +511,7 @@
+             cycles -= is486 ? 4 : 5;                                                                              \
+             reads++;                                                                                              \
+             total_cycles += is486 ? 4 : 5;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
+@@ -542,7 +545,7 @@
+             cycles -= is486 ? 4 : 5;                                                                              \
+             reads++;                                                                                              \
+             total_cycles += is486 ? 4 : 5;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
+@@ -576,7 +579,7 @@
+             cycles -= is486 ? 4 : 5;                                                                              \
+             reads++;                                                                                              \
+             total_cycles += is486 ? 4 : 5;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, 0, 0);                                                     \
+@@ -766,7 +769,7 @@
+             cycles -= is486 ? 5 : 8;                                                                              \
+             reads++;                                                                                              \
+             total_cycles += is486 ? 5 : 8;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
+@@ -801,7 +804,7 @@
+             cycles -= is486 ? 5 : 8;                                                                              \
+             reads++;                                                                                              \
+             total_cycles += is486 ? 5 : 8;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, reads, 0, 0, 0, 0);                                                     \
+@@ -836,7 +839,7 @@
+             cycles -= is486 ? 5 : 8;                                                                              \
+             reads++;                                                                                              \
+             total_cycles += is486 ? 5 : 8;                                                                        \
+-            if ((cycles < cycles_end) || smi_line)                                                                \
++            if (((cycles < cycles_end) && (trap || !x86ref_rep_whole)) || smi_line)                                                                \
+                 break;                                                                                            \
+         }                                                                                                         \
+         PREFETCH_RUN(total_cycles, 1, -1, 0, reads, 0, 0, 0);                                                     \
 diff --git a/src/cpu/x86_ops_ret.h b/src/cpu/x86_ops_ret.h
 index 4bd8f8dda..72d5586d1 100644
 --- a/src/cpu/x86_ops_ret.h
@@ -1874,10 +2194,15 @@ index 4bd8f8dda..72d5586d1 100644
          cycles -= timing_iret_rm;
      }
 diff --git a/src/cpu/x86_ops_stack.h b/src/cpu/x86_ops_stack.h
-index 183ddebc4..51d3743f3 100644
+index 183ddebc4..b1a10d842 100644
 --- a/src/cpu/x86_ops_stack.h
 +++ b/src/cpu/x86_ops_stack.h
-@@ -76,28 +76,54 @@ POP_L_OP(EDI)
+@@ -1,3 +1,4 @@
++extern int (*x86ref_ss_next_bad)(void);
+ #define PUSH_W_OP(reg)                         \
+     static int opPUSH_##reg(UNUSED(uint32_t fetchdat)) \
+     {                                          \
+@@ -76,28 +77,54 @@ POP_L_OP(EDI)
  POP_L_OP(EBP)
  POP_L_OP(ESP)
  
@@ -1932,7 +2257,7 @@ index 183ddebc4..51d3743f3 100644
          writememw(ss, ((SP - 16) & 0xFFFF), DI);
          if (!cpu_state.abrt)
              SP -= 16;
-@@ -110,24 +136,40 @@ static int
+@@ -110,24 +137,40 @@ static int
  opPUSHA_l(UNUSED(uint32_t fetchdat))
  {
      if (stack32) {
@@ -1973,7 +2298,7 @@ index 183ddebc4..51d3743f3 100644
          writememl(ss, ((SP - 32) & 0xFFFF), EDI);
          if (!cpu_state.abrt)
              SP -= 32;
-@@ -141,50 +183,114 @@ static int
+@@ -141,50 +184,114 @@ static int
  opPOPA_w(UNUSED(uint32_t fetchdat))
  {
      if (stack32) {
@@ -2126,7 +2451,7 @@ index 183ddebc4..51d3743f3 100644
          SP += 16;
      }
      CLOCK_CYCLES((is486) ? 9 : 24);
-@@ -195,50 +301,114 @@ static int
+@@ -195,50 +302,114 @@ static int
  opPOPA_l(UNUSED(uint32_t fetchdat))
  {
      if (stack32) {
@@ -2279,7 +2604,7 @@ index 183ddebc4..51d3743f3 100644
          SP += 32;
      }
      CLOCK_CYCLES((is486) ? 9 : 24);
-@@ -295,7 +465,7 @@ opPUSH_imm_bl(uint32_t fetchdat)
+@@ -295,7 +466,7 @@ opPUSH_imm_bl(uint32_t fetchdat)
  }
  
  static int
@@ -2288,7 +2613,7 @@ index 183ddebc4..51d3743f3 100644
  {
      uint16_t temp;
  
-@@ -324,8 +494,19 @@ opPOPW_a16(uint32_t fetchdat)
+@@ -324,8 +495,19 @@ opPOPW_a16(uint32_t fetchdat)
      PREFETCH_RUN((cpu_mod == 3) ? 4 : 5, 2, rmdat, 1, 0, (cpu_mod == 3) ? 0 : 1, 0, 0);
      return cpu_state.abrt;
  }
@@ -2309,7 +2634,7 @@ index 183ddebc4..51d3743f3 100644
  {
      uint16_t temp;
  
-@@ -354,9 +535,20 @@ opPOPW_a32(uint32_t fetchdat)
+@@ -354,9 +536,20 @@ opPOPW_a32(uint32_t fetchdat)
      PREFETCH_RUN((cpu_mod == 3) ? 4 : 5, 2, rmdat, 1, 0, (cpu_mod == 3) ? 0 : 1, 0, 1);
      return cpu_state.abrt;
  }
@@ -2331,7 +2656,7 @@ index 183ddebc4..51d3743f3 100644
  {
      uint32_t temp;
  
-@@ -385,8 +577,19 @@ opPOPL_a16(uint32_t fetchdat)
+@@ -385,8 +578,19 @@ opPOPL_a16(uint32_t fetchdat)
      PREFETCH_RUN((cpu_mod == 3) ? 4 : 5, 2, rmdat, 0, 1, 0, (cpu_mod == 3) ? 0 : 1, 0);
      return cpu_state.abrt;
  }
@@ -2352,7 +2677,7 @@ index 183ddebc4..51d3743f3 100644
  {
      uint32_t temp;
  
-@@ -415,6 +618,31 @@ opPOPL_a32(uint32_t fetchdat)
+@@ -415,6 +619,31 @@ opPOPL_a32(uint32_t fetchdat)
      PREFETCH_RUN((cpu_mod == 3) ? 4 : 5, 2, rmdat, 0, 1, 0, (cpu_mod == 3) ? 0 : 1, 1);
      return cpu_state.abrt;
  }
@@ -2384,7 +2709,7 @@ index 183ddebc4..51d3743f3 100644
  
  static int
  opENTER_w(uint32_t fetchdat)
-@@ -449,6 +677,12 @@ opENTER_w(uint32_t fetchdat)
+@@ -449,6 +678,12 @@ opENTER_w(uint32_t fetchdat)
                  EBP -= 2;
              else
                  BP -= 2;
@@ -2397,7 +2722,7 @@ index 183ddebc4..51d3743f3 100644
              tempw = readmemw(ss, stack32 ? EBP : BP);
              if (cpu_state.abrt) {
                  ESP = tempESP;
-@@ -480,6 +714,30 @@ opENTER_w(uint32_t fetchdat)
+@@ -480,6 +715,30 @@ opENTER_w(uint32_t fetchdat)
          instr_cycles += (is486) ? 3 : 5;
  #endif
      }
@@ -2418,7 +2743,7 @@ index 183ddebc4..51d3743f3 100644
 +        }
 +        if (cr0 >> 31) {
 +            (void) mmutranslatereal(ss + fsp, 1);
-+            if (!cpu_state.abrt && ((fsp & 0xfff) > 0xfff - 1))
++            if (!cpu_state.abrt && (((ss + fsp) & 0xfff) > 0xfff - 1))   /* (the linear address: a page crossing) */
 +                (void) mmutranslatereal(ss + fsp + 1, 1);
 +        }
 +        if (cpu_state.abrt)
@@ -2428,7 +2753,7 @@ index 183ddebc4..51d3743f3 100644
      /* The operand size picks BP or EBP for the frame (the current SDM's
         ENTER, and Bochs; the 1999 book had the stack size pick it) */
      BP = frame_ptr;
-@@ -519,8 +777,10 @@ opENTER_l(uint32_t fetchdat)
+@@ -519,8 +778,10 @@ opENTER_l(uint32_t fetchdat)
      PUSH_L(EBP);
      if (cpu_state.abrt)
          return 1;
@@ -2441,7 +2766,7 @@ index 183ddebc4..51d3743f3 100644
  
      if (count > 0) {
          while (--count) {
-@@ -528,6 +788,12 @@ opENTER_l(uint32_t fetchdat)
+@@ -528,6 +789,12 @@ opENTER_l(uint32_t fetchdat)
                  EBP -= 4;
              else
                  BP -= 4;
@@ -2454,7 +2779,7 @@ index 183ddebc4..51d3743f3 100644
              templ = readmeml(ss, stack32 ? EBP : BP);
              if (cpu_state.abrt) {
                  ESP = tempESP;
-@@ -561,6 +827,30 @@ opENTER_l(uint32_t fetchdat)
+@@ -561,6 +828,30 @@ opENTER_l(uint32_t fetchdat)
      }
      /* The operand size picks BP or EBP for the frame (the current SDM's
         ENTER, and Bochs; the 1999 book had the stack size pick it) */
@@ -2475,7 +2800,7 @@ index 183ddebc4..51d3743f3 100644
 +        }
 +        if (cr0 >> 31) {
 +            (void) mmutranslatereal(ss + fsp, 1);
-+            if (!cpu_state.abrt && ((fsp & 0xfff) > 0xfff - 3))
++            if (!cpu_state.abrt && (((ss + fsp) & 0xfff) > 0xfff - 3))   /* (the linear address: a page crossing) */
 +                (void) mmutranslatereal(ss + fsp + 3, 1);
 +        }
 +        if (cpu_state.abrt)
@@ -2485,6 +2810,32 @@ index 183ddebc4..51d3743f3 100644
      EBP = frame_ptr;
  
      if (stack32)
+@@ -697,6 +988,12 @@ opPOP_SS_w(uint32_t fetchdat)
+     cpu_state.op32   = use32;
+     cpu_state.ssegs  = 0;
+     cpu_state.ea_seg = &cpu_state.seg_ds;
++    /* x86ref: the instruction after MOV / POP SS beyond the CS limit: #GP(0) at it
++       (86Box runs it inline, without the limit check of a fetch) */
++    if (x86ref_ss_next_bad && x86ref_ss_next_bad()) {
++        x86gpf(NULL, 0);
++        return 1;
++    }
+     fetchdat         = fastreadl(cs + cpu_state.pc);
+     cpu_state.pc++;
+     if (cpu_state.abrt)
+@@ -729,6 +1026,12 @@ opPOP_SS_l(uint32_t fetchdat)
+     cpu_state.op32   = use32;
+     cpu_state.ssegs  = 0;
+     cpu_state.ea_seg = &cpu_state.seg_ds;
++    /* x86ref: the instruction after MOV / POP SS beyond the CS limit: #GP(0) at it
++       (86Box runs it inline, without the limit check of a fetch) */
++    if (x86ref_ss_next_bad && x86ref_ss_next_bad()) {
++        x86gpf(NULL, 0);
++        return 1;
++    }
+     fetchdat         = fastreadl(cs + cpu_state.pc);
+     cpu_state.pc++;
+     if (cpu_state.abrt)
 diff --git a/src/cpu/x86_ops_string.h b/src/cpu/x86_ops_string.h
 index 640b08a4d..e6858e21e 100644
 --- a/src/cpu/x86_ops_string.h
@@ -2974,7 +3325,7 @@ index 802ee1e04..75e7077e7 100644
  }
  
 diff --git a/src/mem/mem.c b/src/mem/mem.c
-index 2063a0d67..c1a6b6384 100644
+index 2063a0d67..82d81d726 100644
 --- a/src/mem/mem.c
 +++ b/src/mem/mem.c
 @@ -361,6 +361,21 @@ pae_load_pdptes(void)
@@ -3068,7 +3419,29 @@ index 2063a0d67..c1a6b6384 100644
      temp3 = temp & temp2;
  
      if (!(temp & 1) || ((CPL == 3) && !(temp3 & 4) && !cpl_override) || (rw && !cpl_override && !(temp3 & 2) && ((CPL == 3) || (cr0 & WP_FLAG))))
-@@ -966,9 +982,30 @@ writemembl_no_mmut(uint32_t addr, uint32_t a64, uint8_t val)
+@@ -658,8 +674,10 @@ addreadlookup(uint32_t virt, uint32_t phys)
+     int      cur_rln      = *rln | (int) small_offset;
+ 
+     /* Nothing goes in while a debug register breakpoint is armed, so that
+-       every access is checked (cpu_dr7_update()). */
+-    if ((virt == 0xffffffff) || cpu_dr_armed)
++       every access is checked (cpu_dr7_update()). Nor does a system access made with the
++       supervisor override (TSS I/O bitmap, descriptor tables at CPL 3): the lookups skip the
++       U/S check, so a later user access to that page would pass without it (486: faults). */
++    if ((virt == 0xffffffff) || cpu_dr_armed || cpl_override)
+         return;
+ 
+     if (GDBSTUB_WATCHED(virt))
+@@ -695,7 +713,7 @@ addwritelookup_remapped(uint32_t virt, uint32_t phys, uint32_t ram_addr)
+ {
+     /* As in addreadlookup(). The RAM write handlers mark code pages dirty
+        themselves, so page_lookup is not needed for that meanwhile. */
+-    if ((virt == 0xffffffff) || cpu_dr_armed)
++    if ((virt == 0xffffffff) || cpu_dr_armed || cpl_override)
+         return;
+ 
+     if (GDBSTUB_WATCHED(virt))
+@@ -966,9 +984,30 @@ writemembl_no_mmut(uint32_t addr, uint32_t a64, uint8_t val)
          map->write_b(addr, val, map->priv);
  }
  
@@ -3099,7 +3472,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
      uint64_t       a;
  
-@@ -1032,6 +1069,8 @@ readmemwl(uint32_t addr)
+@@ -1032,6 +1071,8 @@ readmemwl(uint32_t addr)
  void
  writememwl(uint32_t addr, uint16_t val)
  {
@@ -3108,7 +3481,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
      uint64_t       a;
  
-@@ -1113,6 +1152,8 @@ writememwl(uint32_t addr, uint16_t val)
+@@ -1113,6 +1154,8 @@ writememwl(uint32_t addr, uint16_t val)
  uint16_t
  readmemwl_no_mmut(uint32_t addr, uint32_t *a64)
  {
@@ -3117,7 +3490,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
  
      GDBSTUB_MEM_ACCESS(addr, GDBSTUB_MEM_READ, 2);
-@@ -1160,6 +1201,8 @@ readmemwl_no_mmut(uint32_t addr, uint32_t *a64)
+@@ -1160,6 +1203,8 @@ readmemwl_no_mmut(uint32_t addr, uint32_t *a64)
  void
  writememwl_no_mmut(uint32_t addr, uint32_t *a64, uint16_t val)
  {
@@ -3126,7 +3499,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
  
      GDBSTUB_MEM_ACCESS(addr, GDBSTUB_MEM_WRITE, 2);
-@@ -1214,6 +1257,8 @@ writememwl_no_mmut(uint32_t addr, uint32_t *a64, uint16_t val)
+@@ -1214,6 +1259,8 @@ writememwl_no_mmut(uint32_t addr, uint32_t *a64, uint16_t val)
  uint32_t
  readmemll(uint32_t addr)
  {
@@ -3135,7 +3508,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
      int            i;
      uint64_t       a = 0x0000000000000000ULL;
-@@ -1292,6 +1337,8 @@ readmemll(uint32_t addr)
+@@ -1292,6 +1339,8 @@ readmemll(uint32_t addr)
  void
  writememll(uint32_t addr, uint32_t val)
  {
@@ -3144,7 +3517,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
      int            i;
      uint64_t       a = 0x0000000000000000ULL;
-@@ -1391,6 +1438,8 @@ writememll(uint32_t addr, uint32_t val)
+@@ -1391,6 +1440,8 @@ writememll(uint32_t addr, uint32_t val)
  uint32_t
  readmemll_no_mmut(uint32_t addr, uint32_t *a64)
  {
@@ -3153,7 +3526,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
  
      GDBSTUB_MEM_ACCESS(addr, GDBSTUB_MEM_READ, 4);
-@@ -1440,6 +1489,8 @@ readmemll_no_mmut(uint32_t addr, uint32_t *a64)
+@@ -1440,6 +1491,8 @@ readmemll_no_mmut(uint32_t addr, uint32_t *a64)
  void
  writememll_no_mmut(uint32_t addr, uint32_t *a64, uint32_t val)
  {
@@ -3162,7 +3535,7 @@ index 2063a0d67..c1a6b6384 100644
      mem_mapping_t *map;
  
      GDBSTUB_MEM_ACCESS(addr, GDBSTUB_MEM_WRITE, 4);
-@@ -1698,6 +1749,8 @@ do_mmutranslate(uint32_t addr, uint32_t *a64, int num, int write)
+@@ -1698,6 +1751,8 @@ do_mmutranslate(uint32_t addr, uint32_t *a64, int num, int write)
  
      for (i = 0; i < num; i++)
          a64[i] = (uint64_t) (addr + i);

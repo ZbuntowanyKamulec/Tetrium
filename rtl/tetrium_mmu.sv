@@ -393,7 +393,9 @@ module tetrium_mmu (
       for (int i = 0; i < UN; i++)
         if (tlb_we && tlb_ws == ut_lo[(i) * 3 +: 3] && tlb_ww == ut_w[(i) * 2 +: 2]) ut_v[i] <= 1'b0;
       for (int q = 0; q < UN; q++)
-        if (ld_q && ld_sel[q] && !(tlb_we && tlb_ws == ld_vpn[14:12] && tlb_ww == ld_way)) ut_v[q] <= 1'b1;
+        // (a load dropped by a TLB write to its entry in the same cycle still replaces the
+        //  entry's contents: it is left invalid, whatever it held before)
+        if (ld_q && ld_sel[q]) ut_v[q] <= !(tlb_we && tlb_ws == ld_vpn[14:12] && tlb_ww == ld_way);
     end
     for (int q = 0; q < UN; q++)
       if (ld_q && ld_sel[q]) begin ut_e_q[q * 42 +: 42] <= ld_e; ut_lo_q[q * 3 +: 3] <= ld_vpn[14:12]; ut_w[q * 2 +: 2] <= ld_way; end
@@ -426,18 +428,22 @@ module tetrium_mmu (
     if (!rst && !(a20m != a20_q || a20_c))
       for (int q = 0; q < UN; q++)
         if (ut_v[q] && !(tv[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]] && am(c_e[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]]) == ut_e[q * 42 +: 42]))
-          $fatal(1, "mmu: data micro-TLB entry %0d (page %05x) is not a copy of a valid TLB entry (set %0d way %0d: valid %0d, %011x; copy %011x)",
-                 q, {etag(ut_e[q * 42 +: 42]), ut_lo[q * 3 +: 3]}, ut_lo[q * 3 +: 3], ut_w[q * 2 +: 2],
+          $fatal(1, "mmu: cycle %0d: data micro-TLB entry %0d (page %05x) is not a copy of a valid TLB entry (set %0d way %0d: valid %0d, %011x; copy %011x)",
+                 pcyc, q, {etag(ut_e[q * 42 +: 42]), ut_lo[q * 3 +: 3]}, ut_lo[q * 3 +: 3], ut_w[q * 2 +: 2],
                  tv[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]], c_e[ut_lo[q * 3 +: 3]][ut_w[q * 2 +: 2]], ut_e[q * 42 +: 42]);
     if (tlb_we) c_e[tlb_ws][tlb_ww] <= tlb_wd;
     c_inv <= !rst && invlpg_v && !flush_all;
     c_ia  <= invlpg_a;
   end
   logic ptr;
+  int pcyc = 0;
+  always_ff @(posedge clk) pcyc <= pcyc + 1;
   initial ptr = $test$plusargs("ptrace");
   always_ff @(posedge clk) if (ptr) begin
     if (ws == W_IDLE && (e_req || f_req)) $display("W req %s a=%05x wr=%0d user=%0d", e_req ? "E" : "F", e_req ? e_a : f_a, e_wr, e_req ? e_user : f_user);
     if (ws == W_DONE) $display("W done ok=%0d err=%0d e=%011x way=%0d pde=%08x pte=%08x", r_ok, r_err, r_e, r_way, pde, pte);
+    if (ld_q) $display("%0d U load page %05x e=%011x tlb set %0d way %0d -> entry sel %b", pcyc, ld_vpn, ld_e, ld_vpn[14:12], ld_way, ld_sel);
+    if (tlb_we) $display("%0d T write set %0d way %0d e=%011x v=%0d", pcyc, tlb_ws, tlb_ww, tlb_wd, tlb_wv);
   end
 `endif
   // ---------------------------------------------------------------- state

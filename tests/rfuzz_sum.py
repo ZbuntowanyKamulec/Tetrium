@@ -16,6 +16,9 @@ def signature(tags, line):
     mode = tags[0] if tags else '?'
     if 'pg' in tags[1:2]:
         mode += '+pg'
+    if '%Fatal' in line:
+        m = re.search(r'%Fatal: (\S+:\d+)', line)
+        return '%s ASSERT %s' % (mode, m.group(1) if m else '?')
     if 'LOCK MISMATCH' not in line:
         kind = 'TIMEOUT' if 'TIMEOUT' in line else 'HANG' if 'HANG' in line else line.split()[1] if len(line.split()) > 1 else '?'
         return '%s %s' % (mode, kind)
@@ -47,6 +50,8 @@ def main():
             tags = []
         try:
             lines = [x for x in open(base + '.log').read().splitlines() if 'LOCK' in x or 'HANG' in x or 'ERR' in x]
+            # (an RTL assertion ($fatal) stops the simulation before the LOCK line)
+            lines += [x for x in open(base + '.log').read().splitlines() if '%Fatal' in x][:1]
         except OSError:
             lines = []
         line = lines[-1] if lines else 's%d.bin NOLOG (generator failed?)' % s

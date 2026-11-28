@@ -115,6 +115,8 @@ module tetrium_exec #(
     input  logic        ff_go,
     input  logic [2:0]  ff_err,
     input  logic [31:0] ff_lin,
+    input  logic [31:0] fw_lin,       // the fetch block waiting for a walk: beyond the CS limit
+    output logic        f_past,
     // late load port (D-cache re-read / fill) and uncached reads
     output logic        x_act,
     output logic [31:0] x_lin,
@@ -812,6 +814,8 @@ module tetrium_exec #(
   // past FFFF in real / V86 mode): #GP(0), not the #PF (the 486 checks the limit before
   // paging)
   wire ffgp     = ((ff_lin - cs_base) > cs_lim);
+  // (the same for the block the fetch would walk for: it then stops without the walk)
+  always_ff @(posedge clk) f_past <= ((fw_lin - cs_base) > cs_lim);
   // crossing into the next page: load (size msz) / store (size sz)
   // (the needs are registered at E entry: they feed the stall network)
   wire        lcross = lcross_q;
@@ -2027,14 +2031,14 @@ module tetrium_exec #(
     // (the static CPL / IOPL checks come after a decode #UD and before the uop's memory
     // access: #GP(0) before its #SS / #GP / #AC / #PF, as the 486 and Bochs: PUSHF / POPF /
     // IRET in V86 at IOPL < 3)
-    else if (xflt && !xs_q && (xc == 3'd1)) inj_vec0 = 8'd6;
+    else if ((xflt && !xs_q && (xc == 3'd1)) || trflt) inj_vec0 = 8'd6;     // (MOV TR0-2: #UD first)
     else if (chk_flt)         inj_vec0 = 8'd13;
     else if (xflt && !xs_q)   inj_vec0 = (xc == 3'd1) ? 8'd6 : (xc == 3'd3) ? 8'd12 : 8'd13;
     else if (acp)             inj_vec0 = 8'd17;
     else if (xflt && !pf_q)   inj_vec0 = (xc == 3'd3) ? 8'd12 : 8'd13;          // the store's
     else if (pf_q)            begin inj_vec0 = 8'd14; inj_err0 = {13'h0, pf_err}; end
     else if (acs)             inj_vec0 = 8'd17;
-    else if (eop == E_UD || trflt) inj_vec0 = 8'd6;
+    else if (eop == E_UD)     inj_vec0 = 8'd6;
     else if (cpl0_flt)        inj_vec0 = 8'd13;
     else if (gdflt)           inj_vec0 = 8'd1;
     else if (d_f)             begin
@@ -2057,11 +2061,11 @@ module tetrium_exec #(
   always_comb begin
     any_hi = 1'b1; ec_hi = 1'b0;
     if (ibf)                       ec_hi = 1'b0;
-    else if (xflt && !xs_q && (xc == 3'd1)) ec_hi = 1'b0;
+    else if ((xflt && !xs_q && (xc == 3'd1)) || trflt) ec_hi = 1'b0;
     else if (chk_flt)              ec_hi = 1'b1;
     else if (xflt && !xs_q)        ec_hi = (xc != 3'd1);
     else if (acp || (xflt && !pf_q) || pf_q || acs) ec_hi = 1'b1;
-    else if (eop == E_UD || trflt) ec_hi = 1'b0;
+    else if (eop == E_UD)          ec_hi = 1'b0;
     else if (cpl0_flt)             ec_hi = 1'b1;
     else if (gdflt)                ec_hi = 1'b0;
     else if (d_f)                  ec_hi = d_fx || ((d_v >= 8'd10) && (d_v <= 8'd14)) || (d_v == 8'd17);

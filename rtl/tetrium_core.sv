@@ -284,7 +284,8 @@ module tetrium_core #(
   logic [41:0] w_e;
   logic [1:0]  w_way;
   logic        e_lpp_ld, e_lps_ld, x_pcd, ff_flt, ff_go;
-  logic [31:0] ff_lin;
+  logic [31:0] ff_lin, fw_lin;
+  logic        f_past;
   logic [31:12] m_pppn, m_sppn;
   logic        m_pok, m_ppcd, m_sok, e_st_xp;
   logic [1:0]  m_ucpl;
@@ -427,7 +428,7 @@ module tetrium_core #(
       .smc_hit, .snp_hit, .smc_hold,
       .pg(pg_f), .cpl3(cpl3_f), .fl_a, .fl_touch, .fl_hit, .fl_way, .fl_e, .lpf_kill, .tw_v, .tw_sw,
       .lt_v(f_lt_v), .lt_sw(f_lt_sw), .fe_drained, .f_req(f_preq), .f_acc(f_pacc), .f_done(f_pdone),
-      .w_ok, .w_err, .w_e, .w_way, .ff_flt, .ff_err, .ff_lin,
+      .w_ok, .w_err, .w_e, .w_way, .ff_flt, .ff_err, .ff_lin, .fw_lin, .f_past,
       .inv_all, .inv_busy(ic_ibusy), .cs_o(f_cs));
 
   tetrium_decode u_dec (
@@ -494,7 +495,7 @@ module tetrium_core #(
       .m_pppn, .m_pok, .m_ppcd, .m_sppn, .m_sok, .m_ucpl, .e_st_xp,
       .mm_flush, .mm_invlpg, .mm_inva, .mm_lpkill, .e_cr3, .tr_we, .tr_sel7, .tr_d, .tr6, .tr7,
       .e_preq, .e_pa, .e_pwr, .e_puser, .e_pcpl3, .e_pdone, .w_ok, .w_err, .w_e, .e_lpp_ld, .e_lps_ld, .x_pcd,
-      .ff_go, .ff_err, .ff_lin, .m_lock, .lk_hold, .e_gdtl, .e_idtl, .e_ldtl, .m_noacc,
+      .ff_go, .ff_err, .ff_lin, .fw_lin, .f_past, .m_lock, .lk_hold, .e_gdtl, .e_idtl, .e_ldtl, .m_noacc,
       .x_act, .x_lin, .x_lin4, .x_sz, .x_data, .x_hit, .x_hb, .x_cached, .x_fill, .x_fill_done,
       .du_req, .du_done, .du_data(rdata32), .l_st_v,
       .hold_e, .hold_w, .io_ok, .e_cinv, .e_cwb, .c_busy(dc_ibusy || ic_ibusy), .smc_hit, .snp_hit, .a20_chg, .e_busy_valid(e_valid), .e_dmask, .ce_push, .ce_pop, .ce_rip, .e_dm_e, .e_byp_m, .e_byp_ok, .e_byp_32, .e_byp_d, .e_st_v, .e_st_a0, .e_st_a1, .e_st_be0, .e_st_be1,

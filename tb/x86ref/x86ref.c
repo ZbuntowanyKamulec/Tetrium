@@ -337,6 +337,7 @@ lin2phys(uint32_t lin)
 
 /* ---- page-end look-ahead (see X86REF_CLIPPED in 386_common.h) */
 int x86ref_clip_on = 0;
+int x86ref_rep_whole = 1;    /* (x86_ops_rep.h: no yield of a REP string instruction by cycles) */
 static uint32_t clip_ins = 0xFFFFFFFFu, clip_pe = 0;
 static uint32_t clip_for(uint32_t lin);
 /* a code read at linear a: beyond the end of the page of the instruction now running, which
@@ -459,16 +460,19 @@ fetch_cross(uint32_t lin)
     return !!cpu_state.abrt;
 }
 
-/* does the instruction at CS:pc carry a REP prefix? */
+/* is the instruction at CS:pc a string instruction with a REP prefix? (on any other
+   one the prefix is ignored: e.g. F2 75 FD, a JNZ to itself, is no REP to run out) */
 static int
 has_rep(uint32_t lin)
 {
+    int rp = 0;
     for (int i = 0; i < 14; i++) {
         uint8_t b = ram[(lin + i) & rammask & (mem_size * 1024u - 1)];
         switch (b) {
             case 0xf2:
             case 0xf3:
-                return 1;
+                rp = 1;
+                break;
             case 0x26:
             case 0x2e:
             case 0x36:
@@ -480,7 +484,7 @@ has_rep(uint32_t lin)
             case 0xf0:
                 break;
             default:
-                return 0;
+                return rp && (((b >= 0x6c) && (b <= 0x6f)) || ((b >= 0xa4) && (b <= 0xa7)) || ((b >= 0xaa) && (b <= 0xaf)));
         }
     }
     return 0;
@@ -516,6 +520,31 @@ is_xfer(uint32_t lin)
     }
     return 0;
 }
+/* a conditional transfer (Jcc, LOOPcc, JCXZ) not taken: EIP is the next instruction's, which
+   is not checked against the limit here (the 486 faults at that fetch: SDM Jcc "IF condition
+   THEN ... IF tempEIP is not within code segment limit"); (a taken one with displacement 0
+   and a 32-bit operand size cannot be told apart: taken as not taken) */
+static int
+cond_fallthru(uint32_t lin, uint32_t pc0, uint32_t pc)
+{
+    uint32_t msk = rammask & (mem_size * 1024u - 1);
+    uint8_t  b[16];
+    int      i, len;
+    for (i = 0; i < 14; i++) {
+        uint8_t c = ram[(lin + i) & msk];
+        if (c == 0x26 || c == 0x2e || c == 0x36 || c == 0x3e || c == 0x64 || c == 0x65 ||
+            c == 0x66 || c == 0x67 || c == 0xf0 || c == 0xf2 || c == 0xf3)
+            continue;
+        if (!(((c >= 0x70) && (c <= 0x7f)) || ((c >= 0xe0) && (c <= 0xe3)) ||
+              ((c == 0x0f) && (ram[(lin + i + 1) & msk] >= 0x80) && (ram[(lin + i + 1) & msk] <= 0x8f))))
+            return 0;
+        break;
+    }
+    for (i = 0; i < 16; i++)
+        b[i] = ram[lin2phys(cs + pc0 + i) & msk];
+    len = insn_len(b, 16, !!use32);
+    return (len > 0) && (pc == pc0 + (uint32_t) len);
+}
 static struct {
     cpu_state_t st;
     uint32_t    use32;
@@ -524,6 +553,17 @@ static struct {
     uint32_t    dr6;
 } snap;
 int x86ref_xfer_on;      /* (386_dynarec.c: no trap after a transfer beyond the CS limit) */
+static uint32_t xf_ph, xf_pc0;    /* (the transfer being run: a step's first instruction, or the one after MOV / POP SS) */
+static uint16_t xf_cs;
+static int cond_fallthru(uint32_t lin, uint32_t pc0, uint32_t pc);
+/* the transfer being run leaves EIP beyond the CS limit and was taken: #GP(0) at it, no trap
+   after it (a not-taken Jcc / LOOP completes: its TF trap comes first, then the fetch #GP) */
+int
+x86ref_xfer_faults(void)
+{
+    return x86ref_xfer_on && (cpu_state.pc > cpu_state.seg_cs.limit_high) &&
+           !((CS == xf_cs) && cond_fallthru(xf_ph, xf_pc0, cpu_state.pc));
+}
 static int pc_user = -1;   /* (CPL 3 at the last fetch-page check, ref_step) */
 /* a far CALL (9A, FF /3): the 486 pushes the old CS and EIP before the branch fault of a
    target beyond the CS limit is resolved (SDM Vol. 3 22.31.3): the pushes stay in memory */
@@ -624,12 +664,41 @@ cs_past_limit(uint32_t pc0)
         return 0;
     /* the bytes up to the limit are fetched first: their #PF comes before the #GP (the 486
        and Bochs check the limit when the fetch passes it); 86Box then runs into that #PF */
-    if (cr0 >> 31)
+    if (cr0 >> 31) {
         for (uint32_t o = pc0; o <= lim; o++)
             if (mmutranslate_noabrt(cs + o, 0) == 0xffffffffffffffffULL)
                 return 0;
+        /* (that fetch translates their pages: the accessed bits, as the 486's walk) */
+        for (uint32_t o = pc0; o <= lim; o++)
+            if ((o == pc0) || !((cs + o) & 0xfff))
+                (void) mmutranslatereal(cs + o, 0);
+    }
     return 1;
 }
+
+/* the instruction after MOV / POP SS (86Box runs it inside their handler): the same limit
+   check as at a step's first instruction (the 486 fetches it as any other) */
+static int      ss_x;       /* (that instruction is a transfer: checked as a step's first, ref_step) */
+static int      ss_w0;
+static uint32_t ss_ph, ss_pc0;
+static int
+ss_next_bad(void)
+{
+    if (cs_past_limit(cpu_state.pc))
+        return 1;
+    /* (a transfer beyond the limit: #GP(0) at it, with the state after MOV / POP SS) */
+    ss_ph = lin2phys(cs + cpu_state.pc);
+    if (is_xfer(ss_ph)) {
+        snap_take();
+        ss_x           = 1;
+        ss_w0          = wlog_n;
+        ss_pc0         = cpu_state.pc;
+        x86ref_xfer_on = 1;
+        xf_ph = ss_ph; xf_pc0 = ss_pc0; xf_cs = CS;
+    }
+    return 0;
+}
+int (*x86ref_ss_next_bad)(void) = ss_next_bad;
 
 /* shutdown held (the testbench's NMI runs): a step that ends in 86Box's reset (a triple
    fault) restores the state from before the instruction instead (RF set), as the core waits
@@ -691,12 +760,14 @@ ref_step(void)
     int      w0   = wlog_n;
 
     x86_was_reset = 0;
+    ss_x          = 0;
     /* a privilege change to or from CPL 3 (IRET, an interrupt, a task switch): the 486
-       checks the code page's U/S bit again at the next fetch; 86Box keeps the page cached
-       across the change (getpccache() runs only when the fetch page changes) */
+       checks every access's U/S bit against the new CPL; 86Box keeps the pages it has cached
+       across the change (getpccache() runs only when the fetch page changes, and a hit in
+       readlookup2 / writelookup2 skips the U/S check), so they are all dropped */
     if ((CPL == 3) != pc_user) {
         pc_user = (CPL == 3);
-        pccache = 0xFFFFFFFFu;
+        flushmmucache();
     }
     if (hold_shut)
         hs_take();
@@ -730,12 +801,18 @@ ref_step(void)
             rep = 0;
         } else {
             x86ref_xfer_on = xfer;
+            xf_ph = ph0; xf_pc0 = pc0; xf_cs = cs0;
             run_one();
             x86ref_xfer_on = 0;
         }
         /* (a delivered fault leaves EIP at its handler, inside the limit) */
-        if (xfer && !x86_was_reset && (cpu_state.pc > cpu_state.seg_cs.limit_high))
+        if (xfer && !x86_was_reset && (cpu_state.pc > cpu_state.seg_cs.limit_high) &&
+            !((CS == cs0) && cond_fallthru(ph0, pc0, cpu_state.pc)))
             xfer_fault(w0, is_fcall(ph0));
+        else if (ss_x && !x86_was_reset && (cpu_state.pc > cpu_state.seg_cs.limit_high) &&
+                 !((CS == cs0) && cond_fallthru(ss_ph, ss_pc0, cpu_state.pc)))
+            xfer_fault(ss_w0, is_fcall(ss_ph));
+        ss_x = 0;
     }
     if (rep && !trp) {
         /* a REP string instruction yields with pc at its start while the

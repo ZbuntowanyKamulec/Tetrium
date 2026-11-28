@@ -92,6 +92,7 @@ static std::vector<std::pair<uint16_t, uint8_t>> io_log;
 // OUT data, byte by byte in order (port, value): the DUT's I/O write cycles and the model's OUTs,
 // compared as they come (the DUT's write may be on the bus after its instruction retired)
 static std::deque<std::pair<uint16_t, uint8_t>> dut_o, ref_o;
+static bool ref_a20 = true;           // the model's A20 gate (port 92h bit 1)
 // Wishbone data width of the build (make sim BW=64 passes -DBUS_DW to both)
 #ifndef CPU_SIG                                  // processor configuration (tetrium_cfg.svh)
 #define CPU_SIG 0x422
@@ -240,8 +241,11 @@ struct Sim {
                 for (int b = 0; b < BB; b++) {
                     uint32_t a = (r.adr << AB) + b;
                     // the BIOS alias at the top of the 4 GB (i486 reset: FFFFFFF0) = E0000-FFFFF
+                    // (above the 16 MB of RAM, as 86Box: open bus, reads FF, writes dropped)
+                    bool nomem = a >= (1u << 24) && a < 0xFFFE0000u;
                     a = (a >= 0xFFFE0000u) ? (0xE0000 | (a & 0x1FFFF)) : (a & 0xFFFFFF);
-                    if (r.we) {
+                    if (nomem) { if (!r.we) d[b] = 0xFF; }
+                    else if (r.we) {
                         if (r.sel >> b & 1) {
                             mem[a] = r.dat[b];
                             if (wtrack) wtrack->push_back(a);
@@ -303,7 +307,8 @@ struct Sim {
                 // bytes past the first word: at the second word's (physical) address
                 uint32_t a = (uint32_t)top->dbg_st_lin + k;
                 if ((((uint32_t)top->dbg_st_lin & 3) + k) >= 4) a = ((uint32_t)top->dbg_st_lin4 << 2) + ((((uint32_t)top->dbg_st_lin & 3) + k) & 3);
-                dq.push_back({a & 0xFFFFFF, (uint8_t)(top->dbg_st_data >> (8 * k))});
+                if (a < (1u << 24))         // (no RAM above 16 MB: the model logs no write)
+                    dq.push_back({a, (uint8_t)(top->dbg_st_data >> (8 * k))});
             }
         // page walker: accessed / dirty bit updates (the model logs them too)
         static const bool dtr = getenv("LOCKTRACE") && getenv("LOCKTRACE")[0] == '2';
@@ -311,7 +316,8 @@ struct Sim {
         if (lock && dtr && top->dbg_pw_v) printf("     dut pw [%06x] %08x\n", (uint32_t)top->dbg_pw_adr << 2, (uint32_t)top->dbg_pw_dat);
         if (lock && top->dbg_pw_v)
             for (int k = 0; k < 4; k++)
-                dq.push_back({(((uint32_t)top->dbg_pw_adr << 2) + k) & 0xFFFFFF, (uint8_t)(top->dbg_pw_dat >> (8 * k))});
+                if ((((uint32_t)top->dbg_pw_adr << 2) + k) < (1u << 24))
+                    dq.push_back({((uint32_t)top->dbg_pw_adr << 2) + k, (uint8_t)(top->dbg_pw_dat >> (8 * k))});
         top->clk = 1; top->eval();
         if (top->dbg_nmi_ack) { nmi_new = true; n_nmi++; nmi_ecx = top->dbg_gpr[1]; }
 #ifdef TRACE
@@ -766,7 +772,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
             for (int i = 0; i < size; i++) {
                 ref_o.push_back({(uint16_t)(port + i), (uint8_t)(val >> (8 * i))});
                 // (any byte of the OUT: a word / dword at 91h writes 92h too)
-                if ((uint16_t)(port + i) == 0x92) ref_set_a20((val >> (8 * i)) & 2);
+                if ((uint16_t)(port + i) == 0x92) { ref_a20 = (val >> (8 * i)) & 2; ref_set_a20(ref_a20); }
             } } };
         if (ref_init(16384, &lio)) { printf("%s REFERR\n", name.c_str()); return; }
         ref_config(CPU_SIG, HAS_CPUID, 1);
@@ -813,7 +819,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     S.top->sstep = lock_step; S.top->stop_req = 0;
     // model: same image, A20 enabled on both sides
     ref_reset();
-    ref_set_a20(1);
+    ref_set_a20(1); ref_a20 = true;
     uint8_t *rram = ref_ram();
     memset(rram, 0, ref_ram_size()); memcpy(rram, mem, rst ? std::min((size_t)ref_ram_size(), sizeof(mem)) : MEM1M + 0x10000);
     ref_state_t rs;
@@ -836,8 +842,13 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     };            // PTE bytes written by one side only so far (see RefWr)
     long ins = 0, nmis = 0, hist[256] = {0};
     bool trap_pending = false, ss_pending = false, done = false;
+    uint32_t um_hold = 0;          // undefined flags of an instruction after MOV / POP SS stepped later (a trap)
     bool ustop = false;            // stopped at an undefined 16-bit SHLD / SHRD (see below)
     bool nwstop = false;           // stopped at paging with CR0.NW = 1 (see below)
+    bool smcstop = false;          // stopped at code written since the last transfer (see below)
+    std::vector<std::pair<uint32_t, uint32_t>> smc_w;   // (bytes the model wrote since the last transfer, writer's EIP)
+    uint32_t smc_pcs = ~0u, smc_peip = 0;
+    bool a20stop = false;          // stopped at A20 masked in protected mode (see below)
     bool shut_done = false;
     uint32_t dip_last = 0;
     // a delivery the DUT follows with a debug trap (data breakpoint / T bit): the model ran
@@ -855,11 +866,17 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
         // delivery's, say): its own delivery is the next injected retire)
         if (S.nmi_new) { S.nmi_seen = true; S.nmi_new = false; }
         S.tick();
-        // a hang: nothing retired for 200k cycles (not halted)
-        if (S.top->retire) last_ret = S.cyc;
+        // a hang: nothing retired for 200k cycles (not halted); a REP string instruction's
+        // progress (ECX / ESI / EDI changing) counts too: with CR0.CD = 1 and slow bus cycles a
+        // long one takes longer than that
+        static uint32_t prog_q = 0;
+        const uint32_t prog = (uint32_t)S.top->dbg_gpr[1] ^ (uint32_t)S.top->dbg_gpr[6] * 3 ^ (uint32_t)S.top->dbg_gpr[7] * 5;
+        if (S.top->retire || prog != prog_q) last_ret = S.cyc;
+        prog_q = prog;
+        if (S.top->retire) {}
         else if (!S.top->halted && S.cyc - last_ret > 200000) {
-            printf("%-12s HANG at cycle %ld after %ld instructions: ip=%08x cs=%04x\n", name.c_str(), S.cyc, ins,
-                   (uint32_t)S.top->dbg_ip, (unsigned)(S.top->dbg_seg[0] >> 16));
+            printf("%-12s HANG at cycle %ld after %ld instructions: ip=%08x cs=%04x ecx=%08x esi=%08x edi=%08x\n", name.c_str(), S.cyc, ins,
+                   (uint32_t)S.top->dbg_ip, (unsigned)(S.top->dbg_seg[0] >> 16), (uint32_t)S.top->dbg_gpr[1], (uint32_t)S.top->dbg_gpr[6], (uint32_t)S.top->dbg_gpr[7]);
             break;
         }
         if (S.top->retire) {
@@ -879,10 +896,14 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
             uint32_t dlin = (pre.seg[REF_CS].base + (ss_pending ? prev_dip : pre.eip)) & 0xFFFFF;
             (void)dlin;
             for (int k = 0; k < 16; k++) dib[k] = rram[ref_phys(pre.seg[REF_CS].base + (ss_pending ? prev_dip : pre.eip) + k) & 0xFFFFFF];
+            uint8_t sib[16];               // (the bytes at the DUT's previous next IP)
+            for (int k = 0; k < 16; k++) sib[k] = rram[ref_phys(pre.seg[REF_CS].base + prev_dip + k) & 0xFFFFFF];
+            const uint32_t odip = prev_dip;     // (the DUT next IP of the previous retire: a trap-deferred instruction ends there)
             prev_dip = dip;
             uint32_t um = 0;
             int r = 0;
             bool skip = false;
+            bool ins_stepped = !inj;       // (the model steps the instruction at ib now: also a trap after it)
             static const bool ltrace = getenv("LOCKTRACE") != nullptr;
             if (ltrace)
                 printf("  %ld %04x:%04x [%02x %02x %02x %02x %02x %02x]%s c=%ld\n", ins + 1, pre.seg[REF_CS].sel, pre.eip,
@@ -910,17 +931,26 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 if (S.top->dbg_ret_dbt) { model_ahead = true; skip = true; }
             } else if (!inj && ((pre.eflags & 0x100) || S.top->dbg_ret_dbt)) {
                 // (single step, a data breakpoint)
+                // (the instruction after MOV / POP SS: the model steps it with them and the trap;
+                //  its bytes are only known here: a second retire with a trap pending, or one
+                //  after an MOV / POP SS without a trap)
+                if (trap_pending) um_hold |= undef_flags(sib);
+                if (ss_pending) { um_hold |= undef_flags(dib); ss_pending = false; }
                 trap_pending = true; skip = true;      // the model steps instruction + trap together
             } else if (!inj && ss_shadow(dib)) {
                 // the model steps MOV / POP SS and the next instruction together (a chain of
                 // them: the DUT's instruction is at its previous next IP)
-                ss_pending = true; skip = true;
+                skip = true;
+                // (a trap held since the MOV / POP SS (TF, a data breakpoint): this retire is the
+                //  instruction after it, which the model steps with them at the trap)
+                if (trap_pending) um_hold |= undef_flags(sib);
+                else ss_pending = true;
             } else {
                 const bool was_trap = trap_pending && inj;     // (a trap after an instruction the model steps now)
-                if (was_trap) trap_pending = false;
+                if (was_trap) { trap_pending = false; ins_stepped = true; }
                 // (after MOV / POP SS the model steps the next instruction too: its undefined flags)
-                const uint32_t um_ss = ss_pending ? undef_flags(dib) : 0;
-                ss_pending = false;
+                const uint32_t um_ss = (ss_pending ? undef_flags(dib) : 0) | um_hold;
+                ss_pending = false; um_hold = 0;
                 um = inj && !was_trap && !(pre.eflags & 0x100) ? 0 : undef_flags(ib);
                 if (!inj) um = undef_flags(ib);
                 um |= um_ss;
@@ -928,8 +958,13 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 if (inj && S.top->dbg_ret_dbt) { model_ahead = true; skip = true; }
             }
             ins++;
+            static const bool ldbg = getenv("LOCKDBG") != nullptr;      // (the retire branch taken)
+            if (ldbg) printf("     dbg: inj=%d skip=%d tf=%d dbt=%d trap_p=%d ss_p=%d um=%05x um_hold=%05x sib=%02x dib=%02x\n", (int)inj, (int)skip,
+                                          !!(pre.eflags & 0x100), (int)S.top->dbg_ret_dbt, (int)trap_pending, (int)ss_pending, um, um_hold, sib[0], dib[0]);
             if (!skip) {
                 int nw; const ref_wr_t *wl = ref_wlog(&nw);
+                std::vector<uint32_t> wq_smc;
+                for (int k = 0; k < nw; k++) wq_smc.push_back(wl[k].addr & 0xFFFFFF);
                 if (ltrace && getenv("LOCKTRACE")[0] == '2')
                     for (int k = 0; k < nw; k++) printf("     ref wr [%06x]=%02x\n", wl[k].addr, wl[k].val);
                 long npg = -1;
@@ -946,6 +981,26 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 ref_wlog_clear();
                 ref_state_t post;
                 ref_get(&post);
+                // self-modifying code without a jump: the 486 runs the bytes it has prefetched
+                // (up to 32 ahead; the SDM asks for a jump after the store), the model the new
+                // ones; an instruction written since the last control transfer is noted here
+                bool smc_hit = false;
+                {
+                    const bool seq = !inj && pre.seg[REF_CS].sel == smc_pcs && pre.eip - smc_peip - 1 < 15u;
+                    if (!seq) smc_w.clear();
+                    if (rprog && !inj && !smc_w.empty()) {
+                        uint32_t L = post.eip - pre.eip;
+                        if (L - 1 >= 15u) L = 15;
+                        for (uint32_t k = 0; k < L && !smc_hit; k++) {
+                            const uint32_t pa = ref_phys(pre.seg[REF_CS].base + pre.eip + k) & 0xFFFFFF;
+                            for (const auto &w : smc_w)                // (within the 486's 32-byte queue)
+                                if (w.first == pa && pre.eip - w.second <= 32u) { smc_hit = true; break; }
+                        }
+                    }
+                    for (const auto &w : wq_smc) smc_w.push_back({w, pre.eip});
+                    if (smc_w.size() > 512) smc_w.erase(smc_w.begin(), smc_w.begin() + (smc_w.size() - 512));
+                    smc_pcs = pre.seg[REF_CS].sel; smc_peip = pre.eip;
+                }
                 if (r & REF_STEP_HALT) post.eip++;         // the model stays on the HLT
                 char buf[600]; int bl = 0; buf[0] = 0;
                 // registers
@@ -1024,7 +1079,15 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                     }
                     // the FLAGS image of a trap (TF) taken after the instruction: its undefined flags
                     if (um && inj && it->val != d.second) {
-                        uint32_t k = (d.first - (post.gpr[4] + 8)) & 0xFFFFF;
+                        // (at ESP + 8, or ESP + 12 after an error code: 32-bit frames; through the
+                        //  handler's SS base, a 16-bit stack's wrap and the page tables)
+                        const bool ssb = (post.seg[REF_SS].attr >> 10) & 1;
+                        auto fr = [&](uint32_t o) {
+                            const uint32_t e = ssb ? post.gpr[4] + o : (post.gpr[4] + o) & 0xFFFF;
+                            return ref_phys(post.seg[REF_SS].base + e) & 0xFFFFFF;
+                        };
+                        uint32_t k = (d.first - fr(8)) & 0xFFFFFF;
+                        if (k >= 2) { k = (d.first - fr(12)) & 0xFFFFFF; }
                         if (k < 2 && !((it->val ^ d.second) & ~(um >> (8 * k)) & 0xFF)) { it->val = d.second; rram[it->addr] = d.second; }
                     }
                     if (it->val != d.second && bl < 400)
@@ -1049,20 +1112,27 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
                 // Pentium pattern, 86Box another); the run stops there and counts as passed
                 // (its store is compared at the next retire: also right after one, e.g. an interrupt)
                 bool shx_u = false;
-                if (rprog && !inj) {
+                if (rprog && ins_stepped) {
                     int o = 0, p66 = 0;
                     while (o < 13 && (ib[o] == 0x26 || ib[o] == 0x2E || ib[o] == 0x36 || ib[o] == 0x3E || ib[o] == 0xF2 ||
                                       ib[o] == 0xF3 || ib[o] == 0xF0 || (ib[o] >= 0x64 && ib[o] <= 0x67))) { p66 ^= (ib[o] == 0x66); o++; }
                     const int csd = (pre.seg[REF_CS].attr >> 10) & 1;
                     if (!(csd ^ p66) && ib[o] == 0x0F && (ib[o + 1] & 0xF6) == 0xA4) {
-                        const int cnt = (ib[o + 1] & 1) ? (pre.gpr[1] & 31) : (ib[(dip - pre.eip - 1) & 15] & 31);
+                        const uint32_t nip = inj ? odip : dip;   // (injected: a trap after it, dip = the handler)
+                        const int cnt = (ib[o + 1] & 1) ? (pre.gpr[1] & 31) : (ib[(nip - pre.eip - 1) & 15] & 31);
                         shx_u = cnt > 16;
                     }
                 }
                 if (bl && rprog && (shx_u || shx_u_prev)) { ustop = true; done = true; bl = 0; }
+                if (bl && smc_hit) { smcstop = true; done = true; bl = 0; dut_o.clear(); ref_o.clear(); }
                 // paging with CR0.NW = 1 (random code wrote CR0): write hits stay in the cache and
                 // the walker reads memory, a known difference (README); the run stops there, passed
                 if (rprog && !bl && ((post.creg0 & 0xA0000000u) == 0xA0000000u)) { nwstop = true; done = true; }
+                // A20 masked (port 92h) in protected mode: undefined on the 486 (datasheet, A20M#:
+                // "should be asserted only when the processor is in real mode"; an asynchronous
+                // input), e.g. a REP OUTSB to 92h that the model runs one iteration at a time
+                // and fetches again through the new mask: the run stops there, passed
+                if (rprog && !ref_a20 && ((pre.creg0 | post.creg0) & 1)) { a20stop = true; done = true; bl = 0; dut_o.clear(); ref_o.clear(); }
                 shx_u_prev = shx_u;
                 if (bl) {
                     nmis++;
@@ -1120,7 +1190,8 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
             //  NMI / INTR periods)
             if (++idle > std::max(2L, 2 * std::max((long)S.nmi_per, (long)S.irq_per))) done = true;
         } else if (S.nmi_per || S.irq_per) { idle = 0; shut_done = false; }
-        if (rprog && ins >= (long)nret) done = true;
+        // (not between an instruction and its held trap / MOV / POP SS pair: the model steps them together)
+        if (rprog && ins >= (long)nret && !trap_pending && !ss_pending) done = true;
     }
     // final memory image (a random program is stopped mid-flight: its stores were compared above)
     long md = 0; uint32_t ma = 0;
@@ -1166,7 +1237,7 @@ static void run_lock(Sim &S, const std::string &fn, int lat, int rnd, long irq) 
     if (!nmis && done && !md)
         printf("%-12s LOCK OK insns=%ld cycles=%ld ipc=%.3f ref486=%llu%s\n", name.c_str(), ins, S.cyc, (double)ins / S.cyc,
                (unsigned long long)(ref_cycles() - ref_cyc0), (std::string(irq ? " irqs=" + std::to_string(S.n_inta) : "") + (S.nmi_per ? " nmis=" + std::to_string(S.n_nmi) : "") +
-               (ustop ? " (stopped at an undefined 16-bit SHLD / SHRD)" : nwstop ? " (stopped at paging with CR0.NW = 1)" : "")).c_str());
+               (ustop ? " (stopped at an undefined 16-bit SHLD / SHRD)" : nwstop ? " (stopped at paging with CR0.NW = 1)" : smcstop ? " (stopped at code written since the last jump)" : a20stop ? " (stopped at A20 masked in protected mode)" : "")).c_str());
     else {
         printf("%-12s LOCK MISMATCH n=%ld%s first: %s", name.c_str(), nmis, done ? "" : (nmis ? "" : " TIMEOUT"), first);
     if (!done && !nmis) printf(" (insns=%ld cycles=%ld)\n", ins, S.cyc);
